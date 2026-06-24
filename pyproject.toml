@@ -1,0 +1,50 @@
+[tool.poetry]
+name = "chicago-housing"
+version = "0.1.0"
+description = "Hedonic inference on Chicago home prices (ISL Ch.3 practice + Substack series)"
+authors = ["EP"]
+readme = "README.md"
+packages = [{ include = "chicago_housing", from = "src" }]
+
+[tool.poetry.dependencies]
+python = ">=3.11,<3.14"
+# --- data / IO ---
+pandas = ">=2.2"
+numpy = ">=2.0"
+pyarrow = ">=16.0"          # read the CCAO parquet
+# --- inference core (the ISL Ch.3 workhorses) ---
+statsmodels = ">=0.14"      # p-values, F-tests, CIs, summary tables
+scipy = ">=1.13"
+# --- geospatial ---
+geopandas = ">=1.0"
+shapely = ">=2.0"
+pyproj = ">=3.6"
+pyogrio = ">=0.9"           # fast vector IO engine for geopandas
+libpysal = ">=4.12"         # spatial weights
+esda = ">=2.6"              # Moran's I (spatial autocorrelation of residuals)
+# --- viz ---
+matplotlib = ">=3.9"
+seaborn = ">=0.13"
+mapclassify = ">=2.6"       # choropleth binning for geopandas maps
+
+# ML stack — OPTIONAL, only for the prediction post (keeps inference env lean)
+[tool.poetry.group.ml]
+optional = true
+
+[tool.poetry.group.ml.dependencies]
+scikit-learn = ">=1.5"      # KNN (parametric vs non-parametric), metrics
+lightgbm = ">=4.5"          # tree model, to mirror CCAO
+shap = ">=0.46"             # feature attributions
+
+[tool.poetry.group.dev.dependencies]
+jupyterlab = ">=4.2"
+ipykernel = ">=6.29"
+pytest = ">=8.3"
+ruff = ">=0.6"
+
+[build-system]
+requires = ["poetry-core>=1.9.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.ruff]
+line-length = 88
