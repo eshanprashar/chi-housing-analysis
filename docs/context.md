@@ -53,7 +53,7 @@ Of the CCAO-internal prefixes, only some are genuine data *sources*; the rest ar
 
 ### Other standing data notes
 
-- **Sale-validation:** use `sv_is_outlier` to drop non-arm's-length sales (the CCAO-blessed filter) before modeling.
+- **Sale-validation:** examine `sv_is_outlier` and check which non-arm's length sales need to be dropped before modeling. More details in Section 3.
 - **Scope:** this parquet is `model-res-avm` = single/multi-family (class 200) only — **condos excluded** (separate `model-condo-avm`).
 - **Selection bias:** rows are *sold* properties, not the full housing stock; claims about "all homes" carry this caveat.
 - **Unit:** card/PIN-level sales, not tract aggregates. Aggregate residuals/predictions up to community areas for reader-facing maps.
@@ -74,10 +74,37 @@ Of the CCAO-internal prefixes, only some are genuine data *sources*; the rest ar
 
 ## 3. Training sample creation
 
-*(to be filled)*
-- filters applied (residential subset, sale window, arm's-length), final N, any time-adjustment of prices —
+### Scope filters (applied first — they explain most missingness)
+Countywide, all-types, ~9-year parquet → **Chicago / single-family / 2022–24 / single-card, non-prorated**.
+- `loc_property_city == "CHICAGO"`, `meta_modeling_group == "SF"`, `meta_year ∈ {2022, 2023, 2024}`.
+- **Why exclude 2020–21:** COVID shifted the price *surface itself* (space premium, home-office value, urban-condo swings), so pooling those years violates the single-coefficient-set assumption. 2022–24 is a more coefficient-stable regime and sits inside one ACS 2020–2024 5-year vintage (clean sale-vs-predictor alignment).
+- **Residual level drift within 2022–24** (rates ~doubled) is absorbed by a **sale-year fixed effect** (`meta_year` as categorical), not by dropping years.
 
----
+### Sale validity — the asymmetric rule (this supersedes the section-2 note)
+**We do NOT drop on `sv_is_outlier` directly.** That flag bundles two different things, and we treat them oppositely:
+- **Non-market transfers → drop** (a different data-generating process): statutory (`PTAX-203 Exclusion`), `Family Sale`, and *corroborated* entity/holding transfers.
+    - **PTAX-203** is the Illinois Real Estate Transfer Declaration filed on every deed. It has a checkbox section for transfers that are exempt from transfer tax because they aren't ordinary sales — transfers between related entities, deeds correcting a title, transfers to/from a trust for no consideration, foreclosure/deed-in-lieu, court-ordered transfers, etc.
+    - Family Sale — a transfer between related parties (parent→child, between spouses). The price is set by the relationship, not the market: often below market as a gift-in-disguise, sometimes a nominal figure
+- **Price-extreme but genuine sales → keep** (`Statistical Anomaly`, `High/Low price`, `High/Low $/sqft`) and let residual diagnostics (Cook's distance, studentized residuals) handle influence. `Short-term owner` / `Home flip` are *feature-staleness* issues, not validity — also keep-and-diagnose.
+
+**The corroboration principle (the crux):** an entity/trust buyer is *not* evidence of a non-market price on its own.
+- *Low end:* `Non-person sale` **and** a nominal-price signal (`Low price` / `Low $/sqft` / `Raw price threshold`, or `< $10k` floor) → drop. Cheap entity transfers are almost always non-market (portfolio shuffles, REO, nominal-consideration deeds).
+- *High end:* `Non-person sale` + only `Statistical Anomaly` → **keep**. An expensive trust/LLC purchase is usually a real buyer using a vehicle for privacy (the Astor Street pattern); "anomaly" here means *rare/expensive*, not *fake*.
+- **Holding-vehicle names** (`LAND TRUST`, `TITLE` in buyer/seller) are dropped **only when price-corroborated too** — same rule, so a $15k land-trust transfer goes but an $8M one stays.
+
+*One-line defense:* "Sold to an LLC/trust" is a question, not a verdict — entity transfers are treated as non-market only when the **price itself** corroborates it.
+
+### Result
+- 33,106 (scoped) → **30,693** sales after validity filtering (~7% removed).
+- Breakdown: statutory 1,747 · entity+nominal 670 · name+nominal ~77 · ($10k floor caught 0 — CCAO's low-price flags already cover it).
+- **Config:** `SV_ALWAYS_DROP`, `SV_ENTITY`, `SV_NOMINAL_PRICE`, `NONMARKET_NAME_TOKENS`, `PRICE_FLOOR`; logic in `clean.drop_non_market(use_name_rule=True)`.
+
+### Knowingly retained (handle at diagnostics, not cleaning)
+- Genuine estate/nominal transfers at *high* prices with no low-price flag (few; surface as high-leverage points).
+- All price-extreme arm's-length sales (the real tail — the whole point of inference-not-prediction).
+
+### Open
+- **School rating (~25% missing):** impute vs. complete-case — decide deliberately; missingness is likely spatially patterned, so `dropna()` re-introduces geographic bias. *(unresolved)*
 
 ## 4. Model details
 
