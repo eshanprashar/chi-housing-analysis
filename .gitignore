@@ -1,6 +1,7 @@
 # Repo specific files and folders
 /data
 *.DS_Store
+/outputs/tables
 
 
 # Byte-compiled / optimized / DLL files
