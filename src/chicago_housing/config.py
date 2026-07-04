@@ -58,9 +58,6 @@ SV_NOMINAL_PRICE = {"Low price", "Low price per square foot",     # the price it
 PRICE_FLOOR = 10_000     # CCAO-consistent absolute backstop; below Riverdale's real market
 NONMARKET_NAME_TOKENS = ["LAND TRUST", "TITLE"]   # holding vehicles (optional stricter rule)
 
-
-OWNERSHIP_COLS = ['meta_sale_seller_name', 'meta_sale_buyer_name']
-
 # --- target ---
 TARGET_RAW = "meta_sale_price"
 TARGET = "log_sale_price"   # we model log(price)
@@ -88,10 +85,11 @@ BLOCK_B_LOCATION = [
     "prox_nearest_cta_stop_dist_ft",         # transit access
     "prox_nearest_park_dist_ft",             # parks
     "prox_nearest_grocery_store_dist_ft",    # food access
-    "prox_avg_school_rating_in_half_mile",   # school quality — NOTE ~25% missing
+    "prox_avg_school_rating_in_half_mile",   # school quality — filled; null IFF no rated school 
     "loc_access_cmap_walk_total_score",      # walkability
     "prox_nearest_major_road_dist_ft",       # dis-amenity (traffic/noise)
     "prox_num_foreclosure_per_1000_pin_past_5_years",  # distress — assoc, not causal
+    "no_rated_school_nearby",                # ENGINEERED (features/derive.py) — absorbs the null rows
 ]
 
 DEMOGRAPHICS = [
@@ -108,6 +106,23 @@ BLOCKS = {
 
 # categorical predictors (numerically encoded in raw data — treat as categorical)
 CATEGORICAL = ["char_gar1_size", "char_air", "char_porch", "char_bsmt"]
+
+# --- school-rating handling (EDA: rating is null IFF zero RATED schools nearby) ---
+SCHOOL_RATING = "prox_avg_school_rating_in_half_mile"            # raw (in Block B; filled)
+SCHOOL_RATED_COUNT = "prox_num_school_with_rating_in_half_mile"  # derivation input (not a predictor)
+NO_RATED_SCHOOL_FLAG = "no_rated_school_nearby"                  # engineered flag (in Block B)
+
+# columns PRODUCED by features/ (engineered — not read from the parquet)
+ENGINEERED = ["dist_to_loop_ft", NO_RATED_SCHOOL_FLAG]
+# raw columns needed ONLY to derive engineered features (read, but not predictors)
+DERIVE_INPUTS = [SCHOOL_RATED_COUNT]
+
+# buyer/seller names — needed by clean.drop_non_market (holding-vehicle name rule)
+SELLER_NAME = "meta_sale_seller_name"
+BUYER_NAME = "meta_sale_buyer_name"
+
+
+
 
 # --- leakage: proxies OF the outcome; never on the RHS of a market hedonic ---
 LEAKAGE_EXCLUDE = [
@@ -132,18 +147,17 @@ ADDRESS = "loc_property_address"
 # convenience: every column the analytic pipeline needs to read
 def analysis_columns() -> list[str]:
     cols = (
-        [TARGET_RAW, CITY_COL, MODELING_GROUP_COL, YEAR_COL, MULTICARD_COL, PRORATED_COL]
+        [TARGET_RAW, CITY_COL, MODELING_GROUP_COL, YEAR_COL, MULTICARD_COL, PRORATED_COL,
+         SELLER_NAME, BUYER_NAME]
         + SV_REASON_COLS
-        + OWNERSHIP_COLS
         + BLOCK_A_STRUCTURE
-        + [c for c in BLOCK_B_LOCATION if c != "dist_to_loop_ft"]
+        + [c for c in BLOCK_B_LOCATION if c not in ENGINEERED]
+        + DERIVE_INPUTS
         + DEMOGRAPHICS
-        + KEYS + GEO_COORDS + [REPORT_GEO] + [ADDRESS]
+        + KEYS + GEO_COORDS + [REPORT_GEO]
     )
-    # de-dup, preserve order
     seen, out = set(), []
     for c in cols:
         if c not in seen:
-            seen.add(c)
-            out.append(c)
+            seen.add(c); out.append(c)
     return out

@@ -17,6 +17,27 @@ def _as_bool(s: pd.Series) -> pd.Series:
     """Robust boolean coercion (handles python bools OR 'True'/'False' strings)."""
     return s.astype("string").str.strip().str.lower().isin(["true", "1", "t", "yes"])
 
+# ---------------------------------------------------------------------------
+# Scope filters
+# ---------------------------------------------------------------------------
+def scope_filter(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
+    """Chicago + single-family + 2022-24 + single-card / non-prorated."""
+    n0 = len(df)
+    # Filter for Chicago
+    out = df[df[C.CITY_COL].astype("string").str.upper() == C.CITY]
+    # Filter for Single Family
+    out = out[out[C.MODELING_GROUP_COL].astype("string") == C.MODELING_GROUP]
+    # Filter for years 2022,2023 and 2024
+    out = out[out[C.YEAR_COL].astype("string").isin(C.YEARS)]
+    
+    if C.SINGLE_CARD_ONLY:
+        out = out[~_as_bool(out[C.MULTICARD_COL])]
+        out = out[~_as_bool(out[C.PRORATED_COL])]
+    if verbose:
+        print(f"scope_filter:        {n0:>8,} -> {len(out):>8,} rows")
+    return out.copy()
+
+
 
 # ---------------------------------------------------------------------------
 # Column profiling (audit) — missingness AND degeneracy AND cardinality
@@ -49,27 +70,6 @@ def profile_columns(df: pd.DataFrame, columns: list[str] | None = None) -> pd.Da
         .sort_values(["role", "pct_missing"], ascending=[True, False])
         .reset_index(drop=True)
     )
-
-
-# ---------------------------------------------------------------------------
-# Scope filters
-# ---------------------------------------------------------------------------
-def scope_filter(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
-    """Chicago + single-family + 2022-24 + single-card / non-prorated."""
-    n0 = len(df)
-    # Filter for Chicago
-    out = df[df[C.CITY_COL].astype("string").str.upper() == C.CITY]
-    # Filter for Single Family
-    out = out[out[C.MODELING_GROUP_COL].astype("string") == C.MODELING_GROUP]
-    # Filter for years 2022,2023 and 2024
-    out = out[out[C.YEAR_COL].astype("string").isin(C.YEARS)]
-    
-    if C.SINGLE_CARD_ONLY:
-        out = out[~_as_bool(out[C.MULTICARD_COL])]
-        out = out[~_as_bool(out[C.PRORATED_COL])]
-    if verbose:
-        print(f"scope_filter:        {n0:>8,} -> {len(out):>8,} rows")
-    return out.copy()
 
 
 # ---------------------------------------------------------------------------
