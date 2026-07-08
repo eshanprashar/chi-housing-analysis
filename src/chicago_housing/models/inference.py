@@ -36,7 +36,7 @@ def fit_summary_stats(results) -> pd.Series:
         "n_obs": int(results.nobs),
         "r_squared": results.rsquared,
         "adj_r_squared": results.rsquared_adj,
-        "rse": float(np.sqrt(results.scale)) # residual std error, in log units
+        "rse": float(np.sqrt(results.scale)), # residual std error, in log units
         "f_stat": results.fvalue,
         "f_pvalue": results.f_pvalue,
     })
