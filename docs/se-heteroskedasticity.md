@@ -101,3 +101,86 @@ revealed variance structure, contamination, and misspecification all at once.
 Residual analysis is not just an assumptions check — it doubles as a second pass
 at **data validity** and a test of **functional form**. And the honest fix for
 the high-end misspecification is the **log-log transform**, not deleting houses.
+
+---
+
+## 9. Bias, unbiasedness, and omitted-variable bias (OVB)
+
+### The proof that OLS is unbiased (one line)
+
+The estimated slope decomposes as **truth + a noise term**:
+
+`β̂₁ = β₁ + Σᵢ wᵢ εᵢ`,  where the weights `wᵢ = (xᵢ − x̄) / Σⱼ (xⱼ − x̄)²` are fixed
+numbers determined by the x's.
+
+Take the expected value (average over re-draws); β₁ is constant so it passes through:
+
+`E[β̂₁] = β₁ + Σᵢ wᵢ E[εᵢ]`.
+
+If `E[εᵢ] = 0` — the noise has mean zero — every term vanishes and `E[β̂₁] = β₁`. **Unbiased.**
+
+That's the whole proof. Unbiasedness is **not** a deep property of least squares;
+it's a direct consequence of **one assumption: the errors average to zero and
+don't correlate with x.** Assume clean noise → get true aim. Almost circular, in
+a satisfying way.
+
+### The load-bearing part: ε uncorrelated with x
+
+The mean-zero half is cheap (the intercept absorbs any constant offset). The
+condition that actually breaks is that **the noise must not co-move with the
+predictor.** When it does, `Σ wᵢ εᵢ` no longer averages to zero → β̂₁ is **biased**
+(aimed off-target, not merely noisy).
+
+### OVB is the usual cause
+
+ε holds everything x doesn't capture. If an omitted variable **z** affects price
+**and** correlates with x, then z lives inside ε and drags it into correlation
+with x. β̂₁ then absorbs part of z's effect and mis-attributes it to x.
+
+Rule of thumb: `bias ≈ (effect of z on y) × (association of z with x)`. Both
+nonzero → bias.
+
+### Two tiers — the practical distinction (observed vs unobserved)
+
+- **Observed confounder → SOLVABLE.** If you can *measure* z, include it; the bias
+  disappears because z leaves ε and enters the model. **Example: location.** Size
+  correlates with location, location drives price → the single-variable size slope
+  is biased. Fix: add Block B (Step 3). *Watching the size coefficient move when
+  location enters IS this bias being corrected in real time* — and the size of the
+  shift is a measurable statement of how much "size" was really location.
+
+- **Unobserved confounder → HARD / UNSOLVABLE.** If z can't be measured, you can't
+  include it and the bias stays. **Example: interior condition / quality /
+  renovation — the exact CCAO blind spot (they can't enter buildings).** A
+  renovated and a gut-job house with identical sqft/beds/location get the same
+  prediction; whatever links condition to your predictors biases the coefficients,
+  and no amount of adding *observed* features fixes it.
+
+**Why "there's almost always OVB":** because there are almost always *unobserved*
+confounders. No feature set is complete. So the honest stance is never "I removed
+the bias" — it's **"I removed the bias from the confounders I could observe, and
+here's what's plausibly left."**
+
+### What you can still do about unobserved bias (can't remove → reason about it)
+
+- **Sign it.** Often you can argue the *direction*: if condition correlates
+  positively with both size and price, the size coefficient is biased *up*, so the
+  estimate is an *upper bound*. Direction alone is worth a lot.
+- **Proxy it.** Find an observed stand-in (year built / a renovation flag partly
+  proxy condition).
+- **Heavier machinery** — neighborhood fixed effects (absorb anything constant
+  within an area), instruments, bounding arguments. Mostly beyond this project,
+  but worth naming.
+
+### The clean contrast to keep next to the SE one
+
+| Problem | Estimate (aim) | SE (width) |
+|---|---|---|
+| Heteroskedasticity / non-independence | **unbiased** (fine) | **wrong** (too small) |
+| Confounding / OVB | **biased** (off) | can look perfectly fine |
+
+**Different drawers.** Step 1's size-only slope is suffering the *second* one: it
+carries location on its back, so it is a **biased** estimate of size's effect.
+Correcting that — by adding observed confounders block by block — is the whole
+point of Steps 2–3. What can't be corrected (condition/quality) is the residual
+honesty caveat the post has to state.
