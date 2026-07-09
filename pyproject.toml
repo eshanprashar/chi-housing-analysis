@@ -28,6 +28,7 @@ seaborn = ">=0.13"
 mapclassify = ">=2.6"       # choropleth binning for geopandas maps
 
 # ML stack — OPTIONAL, only for the prediction post (keeps inference env lean)
+ccao = "^1.3.1"
 [tool.poetry.group.ml]
 optional = true
 

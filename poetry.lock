@@ -204,6 +204,26 @@ webencodings = "*"
 css = ["tinycss2 (>=1.1.0)"]
 
 [[package]]
+name = "ccao"
+version = "1.3.1"
+description = "Convenience Functions and Datasets for the Cook County Assessor's Office"
+optional = false
+python-versions = ">=3.9"
+groups = ["main"]
+files = [
+    {file = "ccao-1.3.1-py3-none-any.whl", hash = "sha256:773e61b0958b51ee57ce6e6d21504a25bc27dcd2eb300ed36fbc864e85bb60d1"},
+    {file = "ccao-1.3.1.tar.gz", hash = "sha256:69c223985de23c2ade8abba90c291d6bead4452942a7a5528c755d0dbdd6b8b5"},
+]
+
+[package.dependencies]
+numpy = ">=1.23.1"
+pandas = ">=1.4.3"
+
+[package.extras]
+dev = ["mypy (>=1.0.0)", "pytest (>=7.0.0)", "ruff (>=0.8.0)"]
+docs = ["Sphinx (>=7.0)", "myst-parser (>=1.0.0)", "pydata-sphinx-theme (>=0.16.0)", "sphinx-autobuild (>=2024.10.3)", "sphinx-pyproject (>=0.3.0)"]
+
+[[package]]
 name = "certifi"
 version = "2026.6.17"
 description = "Python package for providing Mozilla's CA Bundle."
@@ -4085,4 +4105,4 @@ test = ["pytest", "websockets"]
 [metadata]
 lock-version = "2.1"
 python-versions = ">=3.11,<3.14"
-content-hash = "525d87ff84cc49009284e3843721f3f1a389c47357aa56a5515c4736e875f46d"
+content-hash = "fc6fabf50003c3f257f9ac4b0a7ad91dbc1755ee0ac9aada20442f71896fc447"
