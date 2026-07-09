@@ -3,6 +3,7 @@
 import pandas as pd
 import numpy as np
 import statsmodels.api as sm
+import statsmodels.formula.api as smf
 
 
 def fit_ols(df: pd.DataFrame, target: str, predictors: list[str]):
@@ -40,6 +41,25 @@ def fit_summary_stats(results) -> pd.Series:
         "f_stat": results.fvalue,
         "f_pvalue": results.f_pvalue,
     })
+
+def build_formula(target: str, predictors: list[str], categorical=()) -> str:
+    """Assemble a Patsy formula, wrapping categoricals in C() for dummy-encoding.
+
+    Continuous predictors pass through as-is; anything in `categorical` becomes
+    C(col) so statsmodels creates dummies against a reference level.
+    """
+    cat = set(categorical)
+    terms = [f"C({c})" if c in cat else c for c in predictors]
+    return f"{target} ~ " + " + ".join(terms)
+
+
+def fit_formula(df, formula: str):
+    """Fit OLS from a Patsy formula (handles categoricals, interactions via *).
+
+    Rows with NaN in any formula term are dropped (statsmodels default).
+    """
+
+    return smf.ols(formula, data=df).fit()
 
 
 def partial_f_test(restricted, full):
