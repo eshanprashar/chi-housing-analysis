@@ -8,8 +8,16 @@ No row drops (that's clean.py), no external data (that's crime.py), no geometry
 from __future__ import annotations
 
 import pandas as pd
+import numpy as np
 
 from chicago_housing import config as C
+
+# curved-effect predictors -> log. Distances use log1p (they contain zeros).
+LOG_PLAIN = [
+    "char_bldg_sf", 
+    "char_land_sf", 
+    "acs5_median_income_household_past_year"
+    ]
 
 
 def add_no_rated_school_flag(df: pd.DataFrame) -> pd.DataFrame:
@@ -26,4 +34,18 @@ def add_no_rated_school_flag(df: pd.DataFrame) -> pd.DataFrame:
     rated_count = pd.to_numeric(out[C.SCHOOL_RATED_COUNT], errors="coerce")
     out[C.NO_RATED_SCHOOL_FLAG] = (rated_count == 0).astype(int)
     out[C.SCHOOL_RATING] = out[C.SCHOOL_RATING].fillna(out[C.SCHOOL_RATING].median())
+    return out
+
+def add_log_features(df):
+    """Add log_* versions of the curved-effect continuous predictors.
+
+    Rule: log for CURVATURE (diminishing returns), not for skew. Distances use
+    log1p because several are exactly 0.
+    """
+    out = df.copy()
+    for c in LOG_PLAIN:
+        out[f"log_{c}"] = np.log(out[c].where(out[c] > 0))
+    # TODO: In case I decide to log distance features too - will have to do log1p = log(1+x)
+    #for c in LOG_1P:
+    #    out[f"log_{c}"] = np.log1p(out[c].clip(lower=0))
     return out

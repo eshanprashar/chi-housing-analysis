@@ -16,4 +16,5 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add all engineered columns to an already-cleaned analytic sample."""
     out = spatial.add_distance_to_loop(df)
     out = derive.add_no_rated_school_flag(out)
+    out = derive.add_log_features(out)
     return out
