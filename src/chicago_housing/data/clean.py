@@ -21,14 +21,14 @@ def _as_bool(s: pd.Series) -> pd.Series:
 # Scope filters
 # ---------------------------------------------------------------------------
 def scope_filter(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
-    """Chicago + single-family + 2022-24 + single-card / non-prorated."""
+    """Chicago + single-family + 2022-25 + single-card / non-prorated."""
     n0 = len(df)
     # Filter for Chicago
     out = df[df[C.CITY_COL].astype("string").str.upper() == C.CITY]
     # Filter for Single Family
     out = out[out[C.MODELING_GROUP_COL].astype("string") == C.MODELING_GROUP]
-    # Filter for years 2022,2023 and 2024
-    out = out[out[C.YEAR_COL].astype("string").isin(C.YEARS)]
+    # Filter for years 2022,2023, 2024 and 2025
+    out = out[out[C.SALE_YEAR].astype("string").isin(C.YEARS)]
     
     if C.SINGLE_CARD_ONLY:
         out = out[~_as_bool(out[C.MULTICARD_COL])]
@@ -36,8 +36,6 @@ def scope_filter(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
     if verbose:
         print(f"scope_filter:        {n0:>8,} -> {len(out):>8,} rows")
     return out.copy()
-
-
 
 # ---------------------------------------------------------------------------
 # Column profiling (audit) — missingness AND degeneracy AND cardinality
@@ -71,24 +69,9 @@ def profile_columns(df: pd.DataFrame, columns: list[str] | None = None) -> pd.Da
         .reset_index(drop=True)
     )
 
-
 # ---------------------------------------------------------------------------
 # Sale validity: non-arm's-length (drop) vs price-extreme (keep)
 # ---------------------------------------------------------------------------
-def flag_non_arms_length(df: pd.DataFrame) -> pd.Series:
-    """True where ANY sv_outlier_reason marks a non-market transfer.
-
-    Deliberately does NOT use sv_is_outlier directly — that also flags genuine
-    price-extreme sales, which we KEEP for inference.
-    """
-    mask = pd.Series(False, index=df.index)
-    for col in C.SV_REASON_COLS:
-        if col not in df.columns:
-            continue
-        vals = df[col].astype("string").fillna("")
-        for token in C.NON_ARMS_LENGTH_REASONS:
-            mask |= vals.str.contains(token, case=False, na=False)
-    return mask
 
 def _reason_sets(df):
     """Collapse the three sv_outlier_reason columns into ONE set per row.
@@ -108,71 +91,64 @@ def _reason_sets(df):
         lambda r: {v for v in r.tolist() if isinstance(v, str) and v.strip()}, axis=1
     )
 
-def drop_non_market(df, price_floor=C.PRICE_FLOOR, use_name_rule=True, verbose=True):
-    """Remove NON-MARKET sales while RETAINING genuine price-extreme ones.
+def classify_sales(df: pd.DataFrame) -> pd.DataFrame:
+    """Label each sale by the flags it carries — pure classification, no dropping.
 
-    The asymmetry is deliberate (see context.md §3):
-      - statutory / family transfers        -> always drop (non-market by definition)
-      - entity ('Non-person') / holding-name -> drop ONLY IF the price also looks
-                                                non-market (corroboration)
-      - pure price-extreme flags            -> KEEP (real trades; diagnostics handle
-                                                influence)
-
-    Returns a filtered copy of `df`.
+    Returns a boolean DataFrame aligned to df.index, one column per flag. This is
+    the object EDA slices on (is_entity, is_stale, ...); the drop POLICY lives in
+    drop_non_market. Separating them means we can explore populations freely
+    without re-running (or being entangled with) the drop logic.
     """
-    n0 = len(df)
-    reasons = _reason_sets(df) # one set of flags per row
+    reasons = _reason_sets(df)                       # one set of sv reasons per row
     price   = pd.to_numeric(df[C.TARGET_RAW], errors="coerce")
 
-    # --- classify each row by which KINDS of flag it carries ---
-    # `s & SET` is set-intersection; bool(...) is True if they share any member.
-    # These lines produce series objects that share the same index with df
-    always  = reasons.map(lambda s: bool(s & C.SV_ALWAYS_DROP)) # PTAX / Family
-    entity  = reasons.map(lambda s: bool(s & C.SV_ENTITY)) # 'Non-person sale'
-    nominal = reasons.map(lambda s: bool(s & C.SV_NOMINAL_PRICE)) # low price / low $sqft / raw floor
-    below   = price < price_floor
+    flags = pd.DataFrame(index=df.index)
+    flags["is_statutory"] = reasons.map(lambda s: bool(s & C.SV_ALWAYS_DROP))   # PTAX / Family
+    flags["is_entity"]    = reasons.map(lambda s: bool(s & C.SV_ENTITY))        # Non-person sale
+    flags["is_nominal"]   = reasons.map(lambda s: bool(s & C.SV_NOMINAL_PRICE)) # low price / $sqft / raw
+    flags["is_stale"]     = reasons.map(lambda s: bool(s & C.SV_STALE))         # short-term / flip
+    flags["is_below_floor"] = price < C.PRICE_FLOOR
 
-    # --- THE CORROBORATION RULE ---
-    # An entity buyer alone is NOT enough to drop (LLCs buy at market all the time).
-    # Drop an entity sale only when the PRICE also signals non-market:
-    # entity AND (a nominal-price flag OR below the hard floor).
-    # So: $11.5k LLC-to-LLC  -> entity & nominal -> DROP
-    #     $340k LLC rental    -> entity & not(nominal|below) -> KEEP
-    entity_nonmarket = entity & (nominal | below)     # <- the corroboration rule
+    # holding-vehicle names (land trust / title co) — detected once, fully
+    names = (df["meta_sale_seller_name"].astype("string").fillna("") + " | "
+             + df["meta_sale_buyer_name"].astype("string").fillna("")).str.upper()
+    name_hit = pd.Series(False, index=df.index)
+    for tok in C.NONMARKET_NAME_TOKENS:              # e.g. "LAND TRUST", "TITLE"
+        name_hit = name_hit | names.str.contains(tok, na=False)
+    flags["is_name_hit"] = name_hit
 
-    # Drop = definitional non-market  OR  sub-floor price  OR  corroborated entity.
-    drop = always | below | entity_nonmarket
+    return flags
 
-    # Additional logic based on TRUST/LLC etc
-    # Key point is we drop these names only when the sale price is Nominal - as determined by CCAO - or below a cap - $10K 
-    if use_name_rule:
-        name_hit = pd.Series(False, index=df.index)
-        # Some non-market transfers hide behind HOLDING VEHICLES (land trusts,
-        # title companies) rather than tripping a price flag. Detect them by name...
-        names = (df["meta_sale_seller_name"].astype("string").fillna("") + " | "
-                 + df["meta_sale_buyer_name"].astype("string").fillna("")).str.upper()
-        for tok in C.NONMARKET_NAME_TOKENS: # e.g. "LAND TRUST", "TITLE"
-            name_hit = name_hit | names.str.contains(tok, na=False)
 
-        # ...but apply the SAME corroboration rule as for entities, so we don't
-        # nuke legitimate high-end purchases titled to a trust for privacy.
-        #   $15k land-trust transfer -> name & nominal -> DROP
-        #   $8M  land-trust purchase -> name & not(nominal|below) -> KEEP
-        name_nonmarket = name_hit & (nominal | below)   # corroborate, like the entity rule
-        drop = drop | name_nonmarket
+def drop_non_market(df: pd.DataFrame, flags: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
+    """Apply the drop POLICY to pre-computed flags. Returns the filtered frame only.
+
+    Policy (see context.md §3):
+      - statutory (PTAX/family)      -> always drop (non-market by definition)
+      - sub-floor price              -> always drop
+      - entity / holding-name        -> drop ONLY IF price-corroborated (nominal | below)
+      - price-extreme, stale, etc.   -> KEEP (diagnostics handle influence)
+    """
+    price_corroborated = flags["is_nominal"] | flags["is_below_floor"]
+
+    entity_nonmarket = flags["is_entity"]   & price_corroborated   # corroboration rule
+    name_nonmarket   = flags["is_name_hit"] & price_corroborated   # same rule for names
+
+    drop = (
+        flags["is_statutory"]
+        | flags["is_below_floor"]
+        | entity_nonmarket
+        | name_nonmarket
+    )
 
     out = df[~drop].copy()
     if verbose:
-        print(f"drop_non_market: {n0:,} -> {len(out):,}")
-        print(f"  always (PTAX/family):   {int(always.sum()):,}")
-        print(f"  below ${price_floor:,} floor:  {int(below.sum()):,}")
-        print(f"  entity + nominal/low:   {int(entity_nonmarket.sum()):,}")
-        if use_name_rule:
-            # name-hits we KEPT because the price looked like a real market sale
-            print(f"  land-trust/title kept (market price): {int((name_hit & ~name_nonmarket).sum()):,}")
+        print(f"drop_non_market: {len(df):,} -> {len(out):,}")
+        print(f"  statutory (PTAX/family): {int(flags['is_statutory'].sum()):,}")
+        print(f"  below ${C.PRICE_FLOOR:,} floor:    {int(flags['is_below_floor'].sum()):,}")
+        print(f"  entity + price-corrob.:  {int(entity_nonmarket.sum()):,}")
+        print(f"  name + price-corrob.:    {int(name_nonmarket.sum()):,}")
     return out
-
-
 # ---------------------------------------------------------------------------
 # Target + assembly
 # ---------------------------------------------------------------------------
@@ -186,9 +162,9 @@ def add_log_target(df: pd.DataFrame) -> pd.DataFrame:
 def build_analytic_sample(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
     """Full Step 0a pipeline: scope -> validity -> log target -> drop null target."""
     out = scope_filter(df, verbose=verbose)
-    out = drop_non_market(out, price_floor=C.PRICE_FLOOR, use_name_rule=True, verbose=verbose)
+    out, kept_entity = drop_non_market(out, price_floor=C.PRICE_FLOOR, use_name_rule=True, verbose=verbose)
     out = add_log_target(out)
     out = out[out[C.TARGET].notna()].copy()
     if verbose:
         print(f"analytic sample:              {len(out):>8,} rows")
-    return out
+    return out, kept_entity
