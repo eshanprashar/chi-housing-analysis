@@ -73,6 +73,11 @@ def profile_columns(df: pd.DataFrame, columns: list[str] | None = None) -> pd.Da
 # Sale validity: non-arm's-length (drop) vs price-extreme (keep)
 # ---------------------------------------------------------------------------
 
+def _is_legal_entity(name: pd.Series) -> pd.Series:
+    """True where the name matches CCAO's legal-entity keyword regex."""
+    n = name.astype("string").str.lower().fillna("")
+    return n.str.contains(C.ENTITY_KEYWORDS, na=False, regex=True)
+
 def _reason_sets(df):
     """Collapse the three sv_outlier_reason columns into ONE set per row.
     Each sale can trip up to three flags, spread across reason1/reason2/reason3
@@ -94,31 +99,38 @@ def _reason_sets(df):
 def classify_sales(df: pd.DataFrame) -> pd.DataFrame:
     """Label each sale by the flags it carries — pure classification, no dropping.
 
-    Returns a boolean DataFrame aligned to df.index, one column per flag. This is
-    the object EDA slices on (is_entity, is_stale, ...); the drop POLICY lives in
-    drop_non_market. Separating them means we can explore populations freely
-    without re-running (or being entangled with) the drop logic.
+    Returns a boolean DataFrame aligned to df.index. Entity + short-term-owner are
+    RECOMPUTED to match CCAO's published methodology (see notes above); statutory
+    (PTAX/Family) and the statistical price/anomaly flags are consumed from the
+    County's pre-computed `sv` reason columns (we don't replicate their isolation
+    forest or last-name parser — we're a consumer of those outputs).
     """
-    reasons = _reason_sets(df)                       # one set of sv reasons per row
+    reasons = _reason_sets(df)
     price   = pd.to_numeric(df[C.TARGET_RAW], errors="coerce")
 
     flags = pd.DataFrame(index=df.index)
-    flags["is_statutory"] = reasons.map(lambda s: bool(s & C.SV_ALWAYS_DROP))   # PTAX / Family
-    flags["is_entity"]    = reasons.map(lambda s: bool(s & C.SV_ENTITY))        # Non-person sale
-    flags["is_nominal"]   = reasons.map(lambda s: bool(s & C.SV_NOMINAL_PRICE)) # low price / $sqft / raw
-    flags["is_stale"]     = reasons.map(lambda s: bool(s & C.SV_STALE))         # short-term / flip
+
+    # --- consumed from CCAO's pre-computed reason columns ---
+    flags["is_statutory"] = reasons.map(lambda s: bool(s & C.SV_ALWAYS_DROP))    # PTAX / Family
+    flags["is_nominal"]   = reasons.map(lambda s: bool(s & C.SV_NOMINAL_PRICE))  # low price / $sqft / raw
     flags["is_below_floor"] = price < C.PRICE_FLOOR
 
-    # holding-vehicle names (land trust / title co) — detected once, fully
-    names = (df["meta_sale_seller_name"].astype("string").fillna("") + " | "
-             + df["meta_sale_buyer_name"].astype("string").fillna("")).str.upper()
-    name_hit = pd.Series(False, index=df.index)
-    for tok in C.NONMARKET_NAME_TOKENS:              # e.g. "LAND TRUST", "TITLE"
-        name_hit = name_hit | names.str.contains(tok, na=False)
-    flags["is_name_hit"] = name_hit
+    # --- entity: RECOMPUTED with CCAO's keyword regex, per side ---
+    # A sale is "Non-person" if EITHER party is a legal entity (their
+    # sv_buyer_category / sv_seller_category .eq("legal_entity").any(axis=1)).
+    flags["entity_buyer"]  = _is_legal_entity(df["meta_sale_buyer_name"])
+    flags["entity_seller"] = _is_legal_entity(df["meta_sale_seller_name"])
+    flags["is_entity"]     = flags["entity_buyer"] | flags["entity_seller"]
+
+    # --- short-term owner: RECOMPUTED with the 365-day rule ---
+    # days since this parcel last transacted; < 365 => short-term (a flip window).
+    d = df[["meta_pin", "meta_sale_date"]].copy()
+    d["meta_sale_date"] = pd.to_datetime(d["meta_sale_date"])
+    d = d.sort_values("meta_sale_date")
+    days_since_last = d.groupby("meta_pin")["meta_sale_date"].diff().dt.days
+    flags["is_stale"] = (days_since_last.reindex(df.index) < C.SHORT_TERM_OWNER_DAYS).fillna(False)
 
     return flags
-
 
 def drop_non_market(df: pd.DataFrame, flags: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
     """Apply the drop POLICY to pre-computed flags. Returns the filtered frame only.
@@ -132,13 +144,15 @@ def drop_non_market(df: pd.DataFrame, flags: pd.DataFrame, verbose: bool = True)
     price_corroborated = flags["is_nominal"] | flags["is_below_floor"]
 
     entity_nonmarket = flags["is_entity"]   & price_corroborated   # corroboration rule
-    name_nonmarket   = flags["is_name_hit"] & price_corroborated   # same rule for names
+    # We are already replicating CCAO's logic to identify entities 
+    # So no need to have a separate name_hit logic 
+    #name_nonmarket   = flags["is_name_hit"] & price_corroborated   # same rule for names
 
     drop = (
         flags["is_statutory"]
         | flags["is_below_floor"]
         | entity_nonmarket
-        | name_nonmarket
+    #    | name_nonmarket
     )
 
     out = df[~drop].copy()
@@ -147,7 +161,7 @@ def drop_non_market(df: pd.DataFrame, flags: pd.DataFrame, verbose: bool = True)
         print(f"  statutory (PTAX/family): {int(flags['is_statutory'].sum()):,}")
         print(f"  below ${C.PRICE_FLOOR:,} floor:    {int(flags['is_below_floor'].sum()):,}")
         print(f"  entity + price-corrob.:  {int(entity_nonmarket.sum()):,}")
-        print(f"  name + price-corrob.:    {int(name_nonmarket.sum()):,}")
+        #print(f"  name + price-corrob.:    {int(name_nonmarket.sum()):,}")
     return out
 # ---------------------------------------------------------------------------
 # Target + assembly
@@ -162,9 +176,9 @@ def add_log_target(df: pd.DataFrame) -> pd.DataFrame:
 def build_analytic_sample(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
     """Full Step 0a pipeline: scope -> validity -> log target -> drop null target."""
     out = scope_filter(df, verbose=verbose)
-    out, kept_entity = drop_non_market(out, price_floor=C.PRICE_FLOOR, use_name_rule=True, verbose=verbose)
+    out = drop_non_market(out, price_floor=C.PRICE_FLOOR, use_name_rule=True, verbose=verbose)
     out = add_log_target(out)
     out = out[out[C.TARGET].notna()].copy()
     if verbose:
         print(f"analytic sample:              {len(out):>8,} rows")
-    return out, kept_entity
+    return out

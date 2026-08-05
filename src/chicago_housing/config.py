@@ -21,11 +21,11 @@ TRAINING_PARQUET = DATA_RAW / "training_data.parquet"
 # explain most of the missingness (community area / ward only populate in-city).
 CITY = "CHICAGO"                    # loc_property_city
 MODELING_GROUP = "SF"              # meta_modeling_group (single-family)
-YEARS = ["2022", "2023", "2024"]  # meta_year (str) — excludes COVID (2020-21) + pre-2022
+YEARS = ["2022", "2023", "2024", "2025"]  # meta_year (str) — excludes COVID (2020-21) + pre-2022
 
 CITY_COL = "loc_property_city"
 MODELING_GROUP_COL = "meta_modeling_group"
-YEAR_COL = "meta_year"
+SALE_DATE_COLS = ["meta_sale_date", "meta_year"]
 
 # card <-> PIN cleanliness (drop multi-card / prorated so the unit is clean)
 SINGLE_CARD_ONLY = True
@@ -52,19 +52,56 @@ SV_ALWAYS_DROP   = {"PTAX-203 Exclusion", "Family Sale"}          # non-market b
 SV_ENTITY        = {"Non-person sale"}                            # necessary, NOT sufficient
 SV_NOMINAL_PRICE = {"Low price", "Low price per square foot",     # the price itself looks non-market
                     "Raw price threshold"}
+
+SV_STALE = {"Short-term owner", "Home flip"}   # feature-staleness / rapid re-trade — mixed
+
 # everything else — Statistical Anomaly, High price, High $/sqft — is a genuine
 # price-extreme tail we KEEP (diagnostics handle influence). Short-term owner /
 # Home flip are feature-staleness issues, also keep-and-diagnose.
 PRICE_FLOOR = 10_000     # CCAO-consistent absolute backstop; below Riverdale's real market
-NONMARKET_NAME_TOKENS = ["LAND TRUST", "TITLE"]   # holding vehicles (optional stricter rule)
+# Source: https://github.com/ccao-data/model-sales-val/blob/main/src/model.py
+ENTITY_KEYWORDS = (
+    r"llc| ll$| l$|l l c|estate|training|construction|building|masonry|"
+    r"apartments|plumbing|service|professional|roofing|advanced|office|"
+    r"\blaw\b|\bloan\b|legal|production|woodwork|concepts|corp|company|"
+    r" united|\binc\b|county|entertainment|community|heating|cooling"
+    r"|partners|equity|indsutries|series|revitalization|collection|"
+    r"agency|renovation|consulting|flippers|estates|\bthe \b|dept|"
+    r"funding|opportunity|improvements|servicing|equities|\bsale\b|"
+    r"judicial| in$|bank|\btrust\b|holding|investment|housing"
+    r"|properties|limited|realty|development|capital|management"
+    r"|developers|construction|rentals|group|investments|invest|"
+    r"residences|enterprise|enterprises|ventures|remodeling|"
+    r"specialists|homes|business|venture|restoration|renovations"
+    r"|maintenance|ltd|real estate|builders|buyers|property|financial"
+    r"|associates|consultants|international|acquisitions|credit|design"
+    r"|homeownership|solutions|\bhome\b|diversified|assets|family|\bland\b"
+    r"|revocable|services|rehabbing|\bliving\b|county of cook|fannie mae"
+    r"|veteran|mortgage|savings|lp$|federal natl|hospital|southport|mtg"
+    r"|propert|rehab|neighborhood|advantage|chicago|cook c|\bbk\b|\bhud\b"
+    r"|department|united states|\busa\b|hsbc|midwest|residential|american"
+    r"|tcf|advantage|real e|advantage|fifth third|baptist church"
+    r"|apostolic church|lutheran church|catholic church|\bfed\b|nationstar"
+    r"|advantage|commercial|health|condominium|nationa|association|homeowner"
+    r"|christ church|christian church|baptist church|community church"
+    r"|church of c|\bdelaw\b|lawyer|delawar"
+)
+# CCAO's short-term-owner threshold, copied VERBATIM (SHORT_TERM_OWNER_THRESHOLD).
+# WHY WE REWROTE THIS: the parquet's `sv` reason columns only expose the *result*
+# ("Short-term owner"), not the logic. We recompute it ourselves — days between
+# consecutive sales of the SAME parcel, flagged if < 365 — because (a) it matches
+# the County's exact rule, (b) it makes the flip analysis rest on a derivable fact
+# rather than trusting a pre-baked flag, and (c) it reuses the same-parcel
+# machinery we already need for the price-gap infographic. A sale is short-term if
+# the parcel changed hands again within a year.
+SHORT_TERM_OWNER_DAYS = 365
 
 # --- target ---
 TARGET_RAW = "meta_sale_price"
 TARGET = "log_sale_price"   # we model log(price)
 
-# sale-year fixed effect — absorbs 2022-24 rate-driven price-LEVEL shifts while
-# keeping the feature coefficients clean (and previews the Post 2 time dimension)
-SALE_YEAR_FE = "meta_year"
+# sale-year fixed effect — absorbs 2022-2025 rate-driven price-LEVEL shifts while
+SALE_YEAR = "meta_year"
 
 # --- feature blocks (final pruned set) ---
 BLOCK_A_STRUCTURE = [
@@ -121,9 +158,6 @@ DERIVE_INPUTS = [SCHOOL_RATED_COUNT]
 SELLER_NAME = "meta_sale_seller_name"
 BUYER_NAME = "meta_sale_buyer_name"
 
-
-
-
 # --- leakage: proxies OF the outcome; never on the RHS of a market hedonic ---
 LEAKAGE_EXCLUDE = [
     # CCAO's own assessment outputs (current + prior years)
@@ -147,8 +181,9 @@ ADDRESS = "loc_property_address"
 # convenience: every column the analytic pipeline needs to read
 def analysis_columns() -> list[str]:
     cols = (
-        [TARGET_RAW, CITY_COL, MODELING_GROUP_COL, YEAR_COL, MULTICARD_COL, PRORATED_COL,
+        [TARGET_RAW, CITY_COL, MODELING_GROUP_COL, MULTICARD_COL, PRORATED_COL,
          SELLER_NAME, BUYER_NAME]
+        + SALE_DATE_COLS 
         + SV_REASON_COLS
         + BLOCK_A_STRUCTURE
         + [c for c in BLOCK_B_LOCATION if c not in ENGINEERED]

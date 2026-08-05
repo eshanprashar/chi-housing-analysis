@@ -18,6 +18,7 @@ LOG_PLAIN = [
     "char_land_sf", 
     "acs5_median_income_household_past_year"
     ]
+LOG_1P = [c for c in C.BLOCK_B_LOCATION if c == "dist_to_loop_ft" or c.endswith("_dist_ft")]
 
 
 def add_no_rated_school_flag(df: pd.DataFrame) -> pd.DataFrame:
@@ -45,7 +46,6 @@ def add_log_features(df):
     out = df.copy()
     for c in LOG_PLAIN:
         out[f"log_{c}"] = np.log(out[c].where(out[c] > 0))
-    # TODO: In case I decide to log distance features too - will have to do log1p = log(1+x)
-    #for c in LOG_1P:
-    #    out[f"log_{c}"] = np.log1p(out[c].clip(lower=0))
+    for c in LOG_1P:
+        out[f"log_{c}"] = np.log1p(out[c].clip(lower=0))
     return out
