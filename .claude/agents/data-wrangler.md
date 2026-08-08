@@ -50,13 +50,16 @@ Run these in order. After each step, show a compact table and wait for
 confirmation before doing anything destructive (dropping columns, casting).
 
 ### 1. Profile
-For every candidate column report: `dtype`, `pct_missing`, `n_unique`,
-`pct_modal` (share of the single most common value — a column can be 0% missing
-yet useless if one value covers >95% of rows), and the modal value. Sort so the
-worst offenders surface. Flag three things:
+For every candidate column report: `dtype`, `pct_missing`, **`n_missing` (the
+absolute NULL/None count)**, `n_unique`, `pct_modal` (share of the single most
+common value — a column can be 0% missing yet useless if one value covers >95% of
+rows), and the modal value. Sort so the worst offenders surface. The raw null
+count is a first-class drop-decision basis — a mostly-NULL column is a prime
+candidate for the redundant-drop list. Flag:
+- **null-heavy** columns (high `n_missing` / `pct_missing`) — decide impute vs
+  drop, and say whether the missingness is *structural* (null-IFF some condition)
+  or random, because that changes the fix,
 - **degenerate** columns (very high `pct_modal`, or `n_unique == 1`),
-- **high-missingness** columns (is the missingness structural, i.e. null-IFF some
-  condition, or random? say which — it changes the fix),
 - **dtype smells** (floats whose values are whole numbers → integer counts/years;
   numeric-coded categoricals; dates stored as strings).
 
