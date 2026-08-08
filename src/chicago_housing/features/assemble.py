@@ -16,5 +16,6 @@ def build_features(df: pd.DataFrame) -> pd.DataFrame:
     """Add all engineered columns to an already-cleaned analytic sample."""
     out = spatial.add_distance_to_loop(df)
     out = derive.add_no_rated_school_flag(out)
+    out = derive.add_gar1_exists_flag(out)      # needs recoded char_gar1_size (build_analytic_sample does this)
     out = derive.add_log_features(out)
     return out

@@ -52,11 +52,11 @@ def summarize_distributions(
     """
     rows = []
     for c in _numeric_columns(df, columns):
-        s = pd.to_numeric(df[c], errors="coerce").dropna()
+        s = pd.to_numeric(df[c], errors="coerce").astype("float64").dropna()
         if s.empty:
             continue
         skew = float(s.skew())
-        q01, q50, q99 = (float(v) for v in s.quantile([0.01, 0.50, 0.99]))
+        q10, q50, q99 = (float(v) for v in s.quantile([0.1, 0.50, 0.99]))
         tail_ratio = q99 / q50 if q50 not in (0.0,) else np.nan
         nonneg = bool((s >= 0).all())
 
@@ -74,7 +74,7 @@ def summarize_distributions(
             "mean": float(s.mean()),
             "std": float(s.std()),
             "min": float(s.min()),
-            "p01": q01,
+            "p01": q10,
             "median": q50,
             "p99": q99,
             "max": float(s.max()),
@@ -120,7 +120,7 @@ def plot_distributions(
     axes = np.atleast_1d(axes).ravel()
 
     for ax, c in zip(axes, cols):
-        s = pd.to_numeric(df[c], errors="coerce").dropna()
+        s = pd.to_numeric(df[c], errors="coerce").astype("float64").dropna()
         if clip_upper_quantile is not None and not s.empty:
             s = s.clip(upper=s.quantile(clip_upper_quantile))
         ax.hist(s, bins=bins)
@@ -128,6 +128,89 @@ def plot_distributions(
         ax.tick_params(labelsize=8)
 
     for ax in axes[len(cols):]:      # blank any unused panels
+        ax.set_visible(False)
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_boxplots(
+    df: pd.DataFrame,
+    columns: list[str] | None = None,
+    log: bool = False,
+    ncols: int = 3,
+    panel_size: tuple[float, float] = (4.0, 3.0),
+):
+    """Boxplot grid — the five-number summary + Tukey outlier dots, one per column.
+
+    `log=True` puts the y-axis on a log scale (positive values only) so a heavy
+    tail doesn't crush the box into a line. Numeric-only; returns the Figure.
+    """
+    cols = _numeric_columns(df, columns)
+    if not cols:
+        raise ValueError("no numeric columns to plot")
+
+    ncols = min(ncols, len(cols))
+    nrows = int(np.ceil(len(cols) / ncols))
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(panel_size[0] * ncols, panel_size[1] * nrows)
+    )
+    axes = np.atleast_1d(axes).ravel()
+
+    for ax, c in zip(axes, cols):
+        s = pd.to_numeric(df[c], errors="coerce").astype("float64").dropna()
+        if log:
+            s = s[s > 0]
+            ax.set_yscale("log")
+        ax.boxplot(s, vert=True)
+        ax.set_title(c, fontsize=9)
+        ax.set_xticks([])
+        ax.tick_params(labelsize=8)
+
+    for ax in axes[len(cols):]:
+        ax.set_visible(False)
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_scatter(
+    df: pd.DataFrame,
+    x_cols: list[str],
+    y: str,
+    sample: int | None = 5000,
+    ncols: int = 3,
+    panel_size: tuple[float, float] = (4.0, 3.5),
+    seed: int = 0,
+):
+    """Scatter each column in `x_cols` against `y` — the joint view that separates
+    DATA ERRORS (off the cloud, e.g. cheap price + huge sqft) from GENUINE extremes
+    (on the trend). Numeric x only; sampled to `sample` rows for speed. Returns the
+    Figure. (`y` is passed explicitly so this module stays domain-agnostic.)
+    """
+    xcols = _numeric_columns(df, x_cols)
+    if not xcols:
+        raise ValueError("no numeric x columns to plot")
+
+    d = df[list(dict.fromkeys([*xcols, y]))].copy()   # x cols + y, order-preserving dedupe
+    d[y] = pd.to_numeric(d[y], errors="coerce")
+    if sample and len(d) > sample:
+        d = d.sample(sample, random_state=seed)
+
+    ncols = min(ncols, len(xcols))
+    nrows = int(np.ceil(len(xcols) / ncols))
+    fig, axes = plt.subplots(
+        nrows, ncols, figsize=(panel_size[0] * ncols, panel_size[1] * nrows)
+    )
+    axes = np.atleast_1d(axes).ravel()
+
+    for ax, c in zip(axes, xcols):
+        ax.scatter(pd.to_numeric(d[c], errors="coerce"), d[y], s=6, alpha=0.25)
+        ax.set_xlabel(c, fontsize=8)
+        ax.set_ylabel(y, fontsize=8)
+        ax.tick_params(labelsize=7)
+
+    for ax in axes[len(xcols):]:
         ax.set_visible(False)
 
     fig.tight_layout()

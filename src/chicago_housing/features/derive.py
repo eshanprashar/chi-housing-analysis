@@ -37,6 +37,26 @@ def add_no_rated_school_flag(df: pd.DataFrame) -> pd.DataFrame:
     out[K.SCHOOL_RATING] = out[K.SCHOOL_RATING].fillna(out[K.SCHOOL_RATING].median())
     return out
 
+def add_gar1_exists_flag(df: pd.DataFrame) -> pd.DataFrame:
+    """Add `char_gar1_exists`: 1 if the parcel has a garage, 0 if not, <NA> if unknown.
+
+    CCAO codes "no garage" as the recoded label "0 cars" (raw code 7), so existence
+    is "anything but '0 cars'". Run this AFTER clean.recode_categoricals — it reads
+    the human-readable label, not the raw numeric code.
+
+    Nullable ON PURPOSE: ~15 rows have a NULL garage size and char_gar1_att can't
+    disambiguate them — its "No" means "not *attached*", which covers both no-garage
+    AND detached-garage homes (20k two-car garages are also "No"). So we do NOT
+    assert 0 there; existence is genuinely unknown and stays <NA> (pandas nullable
+    Int64) for the caller to impute if the flag ever enters the model.
+    """
+    out = df.copy()
+    size = out[K.GAR1_SIZE].astype("string")
+    # StringDtype comparison propagates NA, so a null size becomes <NA> automatically.
+    out[K.GAR1_EXISTS_FLAG] = size.ne(K.GAR1_NO_GARAGE_LABEL).astype("Int64")
+    return out
+
+
 def add_log_features(df):
     """Add log_* versions of the curved-effect continuous predictors.
 
