@@ -1,7 +1,7 @@
 """Step 0a: scope filters, sale-validity handling, column profiling, sample build.
 
 The public parquet is COUNTYWIDE, all property types, ~9 years. We carve a clean
-Chicago / single-family / 2022-24 cross-section before any modeling, then split
+Chicago / single-family / 2022-25 cross-section before any modeling, then split
 sale validity (drop non-arm's-length, keep price-extreme) and log the target.
 """
 
@@ -11,6 +11,45 @@ import numpy as np
 import pandas as pd
 
 from chicago_housing import config as C
+from chicago_housing import constants as K
+from chicago_housing.constants import (
+    TARGET_RAW, 
+    CITY_COL,
+    MODELING_GROUP_COL, 
+    MULTICARD_COL, 
+    PRORATED_COL,
+    SELLER_NAME,
+    BUYER_NAME,
+    SALE_DATE_COLS,
+    SV_REASON_COLS,
+    BLOCK_A_STRUCTURE,
+    BLOCK_B_LOCATION,
+    ENGINEERED,
+    DERIVE_INPUTS,
+    DEMOGRAPHICS,
+    KEYS,
+    GEO_COORDS,
+    REPORT_GEO
+)
+
+# every column the analytic pipeline needs to read
+def analysis_columns() -> list[str]:
+    cols = (
+        [TARGET_RAW, CITY_COL, MODELING_GROUP_COL, MULTICARD_COL, PRORATED_COL,
+         SELLER_NAME, BUYER_NAME]
+        + SALE_DATE_COLS
+        + SV_REASON_COLS
+        + BLOCK_A_STRUCTURE
+        + [c for c in BLOCK_B_LOCATION if c not in ENGINEERED]
+        + DERIVE_INPUTS
+        + DEMOGRAPHICS
+        + KEYS + GEO_COORDS + [REPORT_GEO]
+    )
+    seen, out = set(), []
+    for c in cols:
+        if c not in seen:
+            seen.add(c); out.append(c)
+    return out
 
 
 def _as_bool(s: pd.Series) -> pd.Series:
@@ -29,29 +68,98 @@ def scope_filter(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
     out = out[out[C.MODELING_GROUP_COL].astype("string") == C.MODELING_GROUP]
     # Filter for years 2022,2023, 2024 and 2025
     out = out[out[C.SALE_YEAR].astype("string").isin(C.YEARS)]
-    
+
+    # Multi-card refers to parcels with multiple structures; we will drop them for simplicity
     if C.SINGLE_CARD_ONLY:
         out = out[~_as_bool(out[C.MULTICARD_COL])]
         out = out[~_as_bool(out[C.PRORATED_COL])]
+    # Drop redundant columns after filtering
+    out = out.drop(columns=[C.CITY_COL, C.MODELING_GROUP_COL, C.MULTICARD_COL, C.PRORATED_COL])
     if verbose:
         print(f"scope_filter:        {n0:>8,} -> {len(out):>8,} rows")
     return out.copy()
 
 # ---------------------------------------------------------------------------
+# Wrangling fixes — dtype correction + redundant-column drops
+# Both are driven by lists in constants.py that you populate FROM the profile
+# output, then feed back into profile_columns(...) to re-audit the fixed frame.
+# ---------------------------------------------------------------------------
+def convert_float_to_int(
+    df: pd.DataFrame, columns: list[str] | None = None, verbose: bool = True
+) -> pd.DataFrame:
+    """Coerce integer-valued float columns (counts, years) to nullable Int64.
+
+    Driven by constants.CHANGE_DTYPE_FROM_FLOAT_TO_INT unless `columns` is passed.
+    We use pandas' nullable "Int64" (not numpy int) so NaNs survive the cast.
+    Silently skips columns not present in the frame.
+    """
+    cols = columns if columns is not None else K.CHANGE_DTYPE_FROM_FLOAT_TO_INT
+    out = df.copy()
+    changed = []
+    for c in cols:
+        if c not in out.columns:
+            continue
+        out[c] = pd.to_numeric(out[c], errors="coerce").round().astype("Int64")
+        changed.append(c)
+    if verbose:
+        print(f"convert_float_to_int:  {len(changed)} col(s) -> Int64: {changed}")
+    return out
+
+
+def drop_redundant_columns(
+    df: pd.DataFrame, columns: list[str] | None = None, verbose: bool = True
+) -> pd.DataFrame:
+    """Drop columns flagged redundant during wrangling.
+
+    Driven by constants.DROP_REDUNDANT_COLS_WRANGLING unless `columns` is passed.
+    Silently ignores columns already absent (idempotent / re-run safe).
+    """
+    cols = columns if columns is not None else K.DROP_REDUNDANT_COLS_WRANGLING
+    present = [c for c in cols if c in df.columns]
+    out = df.drop(columns=present)
+    if verbose:
+        print(f"drop_redundant_columns: dropped {len(present)}: {present}")
+    return out
+
+
+# ---------------------------------------------------------------------------
 # Column profiling (audit) — missingness AND degeneracy AND cardinality
 # ---------------------------------------------------------------------------
-def profile_columns(df: pd.DataFrame, columns: list[str] | None = None) -> pd.DataFrame:
+def profile_columns(
+    df: pd.DataFrame,
+    columns: list[str] | None = None,
+    *,
+    convert_dtypes: bool = False,
+    drop_columns: bool = False,
+) -> pd.DataFrame:
     """Per-column audit. A column can be 0% missing yet useless (one value in
-    >95% of rows), so we report degeneracy (pct_modal) alongside missingness."""
-    cols = columns if columns is not None else list(df.columns)
+    >95% of rows), so we report degeneracy (pct_modal) alongside missingness.
+
+    The workflow (notebooks/01_01_data_prep.ipynb): profile once with the defaults
+    to SEE the raw dtypes/missingness, record the fixes in constants.py, then
+    re-profile with the flags to audit the CLEANED frame:
+
+        convert_dtypes=True -> apply convert_float_to_int() before profiling
+        drop_columns=True   -> apply drop_redundant_columns() before profiling
+
+    (columns you list in `columns` but that get dropped will show as
+    'COLUMN NOT FOUND' — a useful signal the drop took effect.)
+    """
+    work = df
+    if convert_dtypes:
+        work = convert_float_to_int(work, verbose=False)
+    if drop_columns:
+        work = drop_redundant_columns(work, verbose=False)
+
+    cols = columns if columns is not None else list(work.columns)
     rows = []
     for c in cols:
-        if c not in df.columns:
+        if c not in work.columns:
             rows.append({"column": c, "role": c.split("_")[0], "dtype": "MISSING",
                          "pct_missing": None, "n_unique": None,
                          "pct_modal": None, "modal_value": "COLUMN NOT FOUND"})
             continue
-        s = df[c]
+        s = work[c]
         nonnull = int(s.notna().sum())
         vc = s.value_counts(dropna=True)
         rows.append({
@@ -176,7 +284,8 @@ def add_log_target(df: pd.DataFrame) -> pd.DataFrame:
 def build_analytic_sample(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
     """Full Step 0a pipeline: scope -> validity -> log target -> drop null target."""
     out = scope_filter(df, verbose=verbose)
-    out = drop_non_market(out, price_floor=C.PRICE_FLOOR, use_name_rule=True, verbose=verbose)
+    flags = classify_sales(out)                       # label each sale by its flags
+    out = drop_non_market(out, flags, verbose=verbose)  # apply the drop policy
     out = add_log_target(out)
     out = out[out[C.TARGET].notna()].copy()
     if verbose:
