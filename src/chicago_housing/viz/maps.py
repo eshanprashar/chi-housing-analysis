@@ -6,7 +6,7 @@ from __future__ import annotations
 import folium
 from folium.plugins import FastMarkerCluster, HeatMap
 import pandas as pd
-from chicago_housing import config as C
+from chicago_housing import constants as K
 
 CHICAGO = [41.8781, -87.6298]
 
@@ -70,7 +70,7 @@ def flip_map(enriched: pd.DataFrame) -> folium.Map:
         folium.CircleMarker(
             [r.loc_latitude, r.loc_longitude], radius=4,
             color="#ff7f0e", fill=True, fill_opacity=0.7, weight=1,
-            popup=f"${r[C.TARGET_RAW]:,.0f} · {r.get(C.REPORT_GEO, '')} · {r.meta_year}",
+            popup=f"${r[K.TARGET_RAW]:,.0f} · {r.get(K.REPORT_GEO, '')} · {r.meta_year}",
         ).add_to(m)
     folium.LayerControl().add_to(m)
     return m

@@ -10,7 +10,7 @@ from __future__ import annotations
 import pandas as pd
 import numpy as np
 
-from chicago_housing import config as C
+from chicago_housing import constants as K
 
 # curved-effect predictors -> log. Distances use log1p (they contain zeros).
 LOG_PLAIN = [
@@ -18,7 +18,7 @@ LOG_PLAIN = [
     "char_land_sf", 
     "acs5_median_income_household_past_year"
     ]
-LOG_1P = [c for c in C.BLOCK_B_LOCATION if c == "dist_to_loop_ft" or c.endswith("_dist_ft")]
+LOG_1P = [c for c in K.BLOCK_B_LOCATION if c == "dist_to_loop_ft" or c.endswith("_dist_ft")]
 
 
 def add_no_rated_school_flag(df: pd.DataFrame) -> pd.DataFrame:
@@ -32,9 +32,9 @@ def add_no_rated_school_flag(df: pd.DataFrame) -> pd.DataFrame:
     observed distribution readable).
     """
     out = df.copy()
-    rated_count = pd.to_numeric(out[C.SCHOOL_RATED_COUNT], errors="coerce")
-    out[C.NO_RATED_SCHOOL_FLAG] = (rated_count == 0).astype(int)
-    out[C.SCHOOL_RATING] = out[C.SCHOOL_RATING].fillna(out[C.SCHOOL_RATING].median())
+    rated_count = pd.to_numeric(out[K.SCHOOL_RATED_COUNT], errors="coerce")
+    out[K.NO_RATED_SCHOOL_FLAG] = (rated_count == 0).astype(int)
+    out[K.SCHOOL_RATING] = out[K.SCHOOL_RATING].fillna(out[K.SCHOOL_RATING].median())
     return out
 
 def add_log_features(df):

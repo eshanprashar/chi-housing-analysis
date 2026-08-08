@@ -1,10 +1,10 @@
-"""Matplotlib renderers for EDA. Each takes a tidy frame from analysis/eda.py and
-draws it. Never computes — pass an ax to overlay populations (entity vs non-entity).
+"""Matplotlib renderers. Each takes a tidy frame from analysis/sales_descriptives.py
+and draws it. Never computes — pass an ax to overlay populations (entity vs non-entity).
 """
 
 from __future__ import annotations
 import matplotlib.pyplot as plt
-from chicago_housing import config as C
+from chicago_housing import constants as K
 
 
 def plot_by_year(tidy, ax=None, label=None, partial_years=()):
@@ -28,7 +28,7 @@ def plot_by_month(tidy, ax=None, label=None):
 def plot_median_price_trend(tidy, ax=None):
     """One line per neighborhood, median price over years."""
     ax = ax or plt.subplots(figsize=(8, 5))[1]
-    for nb, grp in tidy.groupby(C.REPORT_GEO):
+    for nb, grp in tidy.groupby(K.REPORT_GEO):
         ax.plot(grp["meta_year"], grp["median_price"], "o-", label=nb)
     ax.set_xlabel("year"); ax.set_ylabel("median price ($)")
     ax.set_title("Median price by neighborhood"); ax.legend(fontsize=8)

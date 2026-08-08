@@ -1,6 +1,6 @@
-"""Assemble the block-structured modeling table from config.BLOCKS."""
+"""Assemble the block-structured modeling table from constants.BLOCKS."""
 
-from chicago_housing.config import BLOCKS
+from chicago_housing.constants import BLOCKS
 
 
 def block_columns(*block_names: str) -> list[str]:
