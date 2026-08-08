@@ -10,7 +10,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from chicago_housing import config as C
 from chicago_housing import constants as K
 from chicago_housing.constants import (
     TARGET_RAW, 
@@ -63,18 +62,18 @@ def scope_filter(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
     """Chicago + single-family + 2022-25 + single-card / non-prorated."""
     n0 = len(df)
     # Filter for Chicago
-    out = df[df[C.CITY_COL].astype("string").str.upper() == C.CITY]
+    out = df[df[K.CITY_COL].astype("string").str.upper() == K.CITY]
     # Filter for Single Family
-    out = out[out[C.MODELING_GROUP_COL].astype("string") == C.MODELING_GROUP]
+    out = out[out[K.MODELING_GROUP_COL].astype("string") == K.MODELING_GROUP]
     # Filter for years 2022,2023, 2024 and 2025
-    out = out[out[C.SALE_YEAR].astype("string").isin(C.YEARS)]
+    out = out[out[K.SALE_YEAR].astype("string").isin(K.YEARS)]
 
     # Multi-card refers to parcels with multiple structures; we will drop them for simplicity
-    if C.SINGLE_CARD_ONLY:
-        out = out[~_as_bool(out[C.MULTICARD_COL])]
-        out = out[~_as_bool(out[C.PRORATED_COL])]
+    if K.SINGLE_CARD_ONLY:
+        out = out[~_as_bool(out[K.MULTICARD_COL])]
+        out = out[~_as_bool(out[K.PRORATED_COL])]
     # Drop redundant columns after filtering
-    out = out.drop(columns=[C.CITY_COL, C.MODELING_GROUP_COL, C.MULTICARD_COL, C.PRORATED_COL])
+    out = out.drop(columns=[K.CITY_COL, K.MODELING_GROUP_COL, K.MULTICARD_COL, K.PRORATED_COL])
     if verbose:
         print(f"scope_filter:        {n0:>8,} -> {len(out):>8,} rows")
     return out.copy()
@@ -122,6 +121,44 @@ def drop_redundant_columns(
     return out
 
 
+def recode_categoricals(
+    df: pd.DataFrame,
+    cols: list[str] | None = None,
+    code_type: str = "long",
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Replace CCAO's numeric char_ codes with human-readable labels.
+
+    Wraps ccao.vars_recode + the official vars_dict, e.g. char_air 1/2 ->
+    'No Central A/C'/'Central A/C', char_roof_cnst 1 -> 'Shingle/Asphalt'.
+    Returns a copy with those columns as pandas Categorical so profiling and plots
+    read cleanly from the START (run it right after scope_filter).
+
+    cols=None (default) recodes every CCAO-coded column present and leaves the
+    numeric char_ measures (char_beds, char_yrblt, char_bldg_sf, char_fbath,
+    char_land_sf, ...) untouched — the vars_dict simply has no entry for them.
+    Pass an explicit list to narrow the set; `code_type` is 'long' (full labels),
+    'short' (abbreviations), or 'code' (keep codes, just drop invalid ones).
+
+    ccao is an optional dependency; the import is local so clean.py loads without it.
+    """
+    try:
+        from ccao import vars_recode
+    except ImportError as e:  # pragma: no cover
+        raise ImportError(
+            "recode_categoricals needs the `ccao` package (pip install ccao)."
+        ) from e
+    out = vars_recode(df.copy(), cols=cols, code_type=code_type, as_factor=True)
+    if verbose:
+        candidate = cols if cols is not None else [c for c in df.columns if c.startswith("char_")]
+        touched = [
+            c for c in candidate
+            if c in df.columns and not df[c].astype("string").equals(out[c].astype("string"))
+        ]
+        print(f"recode_categoricals: {len(touched)} col(s) -> labels: {touched}")
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Column profiling (audit) — missingness AND degeneracy AND cardinality
 # ---------------------------------------------------------------------------
@@ -156,7 +193,7 @@ def profile_columns(
     for c in cols:
         if c not in work.columns:
             rows.append({"column": c, "role": c.split("_")[0], "dtype": "MISSING",
-                         "pct_missing": None, "n_unique": None,
+                         "pct_missing": None, "n_missing": None, "n_unique": None,
                          "pct_modal": None, "modal_value": "COLUMN NOT FOUND"})
             continue
         s = work[c]
@@ -167,6 +204,7 @@ def profile_columns(
             "role": c.split("_")[0],
             "dtype": str(s.dtype),
             "pct_missing": round(float(s.isna().mean()), 3),
+            "n_missing": int(s.isna().sum()),   # absolute NULL/None count — the drop-decision basis
             "n_unique": int(s.nunique(dropna=True)),
             "pct_modal": round(float(vc.iloc[0] / nonnull), 3) if nonnull else None,
             "modal_value": vc.index[0] if len(vc) else None,
@@ -177,6 +215,82 @@ def profile_columns(
         .reset_index(drop=True)
     )
 
+
+# ---------------------------------------------------------------------------
+# Outlier / sanity analysis — REPORT + LABEL, never drops. At the prep stage
+# these hunt DATA ERRORS (impossible values), NOT genuine price-extreme tails,
+# which we keep for the model and handle later via influence diagnostics.
+# ---------------------------------------------------------------------------
+def sanity_checks(df: pd.DataFrame, bounds: dict | None = None) -> pd.DataFrame:
+    """Count rows outside the plausibility bounds in constants.SANITY_BOUNDS.
+
+    Returns a tidy table — one row per checked column — with counts below the low
+    bound, above the high bound, nulls, and the total flagged share. Reports only;
+    drops nothing. Columns not in the frame come back with None counts.
+    """
+    bounds = bounds if bounds is not None else K.SANITY_BOUNDS
+    n = len(df)
+    rows = []
+    for col, (lo, hi) in bounds.items():
+        if col not in df.columns:
+            rows.append({"column": col, "lo": lo, "hi": hi, "n_below": None,
+                         "n_above": None, "n_null": None, "n_flagged": None,
+                         "pct_flagged": None})
+            continue
+        s = pd.to_numeric(df[col], errors="coerce")
+        below = int((s < lo).sum()) if lo is not None else 0
+        above = int((s > hi).sum()) if hi is not None else 0
+        flagged = below + above
+        rows.append({
+            "column": col, "lo": lo, "hi": hi,
+            "n_below": below, "n_above": above, "n_null": int(s.isna().sum()),
+            "n_flagged": flagged, "pct_flagged": round(flagged / n, 4) if n else None,
+        })
+    return pd.DataFrame(rows)
+
+
+def add_price_ratios(df: pd.DataFrame, flag: bool = True) -> pd.DataFrame:
+    """Add price_per_sqft and price_per_bed (returns a copy).
+
+    The ratios are a tighter lens than price alone: an absurd $/sqft flags EITHER
+    a price error OR a size error, catching joint mistakes a per-column check
+    misses. flag=True also adds boolean is_ppsf_outlier / is_ppbed_outlier from
+    the constants bands. Division guards zeros/nulls -> NaN (never inf).
+    """
+    out = df.copy()
+    price = pd.to_numeric(out[K.TARGET_RAW], errors="coerce")
+    sqft = pd.to_numeric(out["char_bldg_sf"], errors="coerce").replace(0, np.nan)
+    beds = pd.to_numeric(out["char_beds"], errors="coerce").replace(0, np.nan)
+    out["price_per_sqft"] = price / sqft
+    out["price_per_bed"] = price / beds
+    if flag:
+        lo_s, hi_s = K.PRICE_PER_SQFT_BOUNDS
+        lo_b, hi_b = K.PRICE_PER_BED_BOUNDS
+        out["is_ppsf_outlier"] = (out["price_per_sqft"] < lo_s) | (out["price_per_sqft"] > hi_s)
+        out["is_ppbed_outlier"] = (out["price_per_bed"] < lo_b) | (out["price_per_bed"] > hi_b)
+    return out
+
+
+def flag_log_iqr(df: pd.DataFrame, columns: list[str], k: float = 1.5) -> pd.DataFrame:
+    """Tukey-fence outlier flags computed on the LOG scale, per column.
+
+    Working in log space keeps genuine right-skew tails (price, sqft) from being
+    flagged wholesale. Returns a boolean frame aligned to df.index, one
+    '<col>_log_iqr_out' column per input — sum it for counts, keep it to label.
+    Only positive values are logged; non-positive/null -> not flagged (they show
+    up in sanity_checks instead). `k` widens (3.0) or tightens the fences.
+    """
+    out = pd.DataFrame(index=df.index)
+    for c in columns:
+        s = pd.to_numeric(df[c], errors="coerce")
+        logv = np.log(s.where(s > 0))
+        q1, q3 = logv.quantile([0.25, 0.75])
+        iqr = q3 - q1
+        lo, hi = q1 - k * iqr, q3 + k * iqr
+        out[f"{c}_log_iqr_out"] = ((logv < lo) | (logv > hi)).fillna(False)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Sale validity: non-arm's-length (drop) vs price-extreme (keep)
 # ---------------------------------------------------------------------------
@@ -184,7 +298,7 @@ def profile_columns(
 def _is_legal_entity(name: pd.Series) -> pd.Series:
     """True where the name matches CCAO's legal-entity keyword regex."""
     n = name.astype("string").str.lower().fillna("")
-    return n.str.contains(C.ENTITY_KEYWORDS, na=False, regex=True)
+    return n.str.contains(K.ENTITY_KEYWORDS, na=False, regex=True)
 
 def _reason_sets(df):
     """Collapse the three sv_outlier_reason columns into ONE set per row.
@@ -194,7 +308,7 @@ def _reason_sets(df):
     sale's set of reasons intersect my drop list?" So we build, per row, a Python
     set like {"Non-person sale", "Statistical Anomaly"} that we can test with `&`.
     """
-    cols = [c for c in C.SV_REASON_COLS if c in df.columns]
+    cols = [c for c in K.SV_REASON_COLS if c in df.columns]
     # For each row r (its three reason cells), keep only real, non-empty strings
     # and put them in a set. `isinstance(v, str)` drops NaN/None; `v.strip()`
     # drops blank/whitespace cells. Result: one set of flags per row.
@@ -214,14 +328,14 @@ def classify_sales(df: pd.DataFrame) -> pd.DataFrame:
     forest or last-name parser — we're a consumer of those outputs).
     """
     reasons = _reason_sets(df)
-    price   = pd.to_numeric(df[C.TARGET_RAW], errors="coerce")
+    price   = pd.to_numeric(df[K.TARGET_RAW], errors="coerce")
 
     flags = pd.DataFrame(index=df.index)
 
     # --- consumed from CCAO's pre-computed reason columns ---
-    flags["is_statutory"] = reasons.map(lambda s: bool(s & C.SV_ALWAYS_DROP))    # PTAX / Family
-    flags["is_nominal"]   = reasons.map(lambda s: bool(s & C.SV_NOMINAL_PRICE))  # low price / $sqft / raw
-    flags["is_below_floor"] = price < C.PRICE_FLOOR
+    flags["is_statutory"] = reasons.map(lambda s: bool(s & K.SV_ALWAYS_DROP))    # PTAX / Family
+    flags["is_nominal"]   = reasons.map(lambda s: bool(s & K.SV_NOMINAL_PRICE))  # low price / $sqft / raw
+    flags["is_below_floor"] = price < K.PRICE_FLOOR
 
     # --- entity: RECOMPUTED with CCAO's keyword regex, per side ---
     # A sale is "Non-person" if EITHER party is a legal entity (their
@@ -236,7 +350,7 @@ def classify_sales(df: pd.DataFrame) -> pd.DataFrame:
     d["meta_sale_date"] = pd.to_datetime(d["meta_sale_date"])
     d = d.sort_values("meta_sale_date")
     days_since_last = d.groupby("meta_pin")["meta_sale_date"].diff().dt.days
-    flags["is_stale"] = (days_since_last.reindex(df.index) < C.SHORT_TERM_OWNER_DAYS).fillna(False)
+    flags["is_stale"] = (days_since_last.reindex(df.index) < K.SHORT_TERM_OWNER_DAYS).fillna(False)
 
     return flags
 
@@ -267,7 +381,7 @@ def drop_non_market(df: pd.DataFrame, flags: pd.DataFrame, verbose: bool = True)
     if verbose:
         print(f"drop_non_market: {len(df):,} -> {len(out):,}")
         print(f"  statutory (PTAX/family): {int(flags['is_statutory'].sum()):,}")
-        print(f"  below ${C.PRICE_FLOOR:,} floor:    {int(flags['is_below_floor'].sum()):,}")
+        print(f"  below ${K.PRICE_FLOOR:,} floor:    {int(flags['is_below_floor'].sum()):,}")
         print(f"  entity + price-corrob.:  {int(entity_nonmarket.sum()):,}")
         #print(f"  name + price-corrob.:    {int(name_nonmarket.sum()):,}")
     return out
@@ -276,18 +390,20 @@ def drop_non_market(df: pd.DataFrame, flags: pd.DataFrame, verbose: bool = True)
 # ---------------------------------------------------------------------------
 def add_log_target(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
-    price = pd.to_numeric(out[C.TARGET_RAW], errors="coerce")
-    out[C.TARGET] = np.log(price.where(price > 0))
+    price = pd.to_numeric(out[K.TARGET_RAW], errors="coerce")
+    out[K.TARGET] = np.log(price.where(price > 0))
     return out
 
 
-def build_analytic_sample(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
-    """Full Step 0a pipeline: scope -> validity -> log target -> drop null target."""
+def build_analytic_sample(df: pd.DataFrame, verbose: bool = True, recode: bool = True) -> pd.DataFrame:
+    """Full Step 0a pipeline: scope -> recode categoricals -> validity -> log target -> drop null target."""
     out = scope_filter(df, verbose=verbose)
+    if recode:
+        out = recode_categoricals(out, verbose=verbose)   # numeric char_ codes -> readable labels
     flags = classify_sales(out)                       # label each sale by its flags
     out = drop_non_market(out, flags, verbose=verbose)  # apply the drop policy
     out = add_log_target(out)
-    out = out[out[C.TARGET].notna()].copy()
+    out = out[out[K.TARGET].notna()].copy()
     if verbose:
         print(f"analytic sample:              {len(out):>8,} rows")
     return out

@@ -19,4 +19,5 @@ DATA_INTERIM = ROOT / "data" / "interim"
 DATA_PROCESSED = ROOT / "data" / "processed"
 OUTPUTS = ROOT / "outputs"
 
-TRAINING_PARQUET = DATA_RAW / "training_data.parquet"
+SF_TRAINING_PARQUET = DATA_RAW / "sf_training_data.parquet"
+CONDO_TRAINING_PARQUET = DATA_RAW / "condo_training_data.parquet"

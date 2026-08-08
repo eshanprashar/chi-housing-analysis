@@ -41,6 +41,11 @@ SCHOOL_RATING = "prox_avg_school_rating_in_half_mile"            # raw rating (f
 SCHOOL_RATED_COUNT = "prox_num_school_with_rating_in_half_mile"  # derivation input
 NO_RATED_SCHOOL_FLAG = "no_rated_school_nearby"                  # engineered flag
 
+# garage (char_gar1_size is recoded to labels; the label "0 cars" == no garage)
+GAR1_SIZE = "char_gar1_size"
+GAR1_EXISTS_FLAG = "char_gar1_exists"          # engineered flag (features/derive.py)
+GAR1_NO_GARAGE_LABEL = "0 cars"                # recoded char_gar1_size value meaning "no garage"
+
 # keys / geography (not predictors)
 KEYS = ["meta_pin", "meta_nbhd_code", "loc_census_tract_geoid"]
 GEO_COORDS = ["loc_latitude", "loc_longitude", "loc_x_3435", "loc_y_3435"]
@@ -197,10 +202,15 @@ LEAKAGE_EXCLUDE = [
 # clean.convert_float_to_int() coerces each to pandas nullable "Int64" (keeps NaN).
 # NOTE: confirm/trim against the profile output before trusting.
 CHANGE_DTYPE_FROM_FLOAT_TO_INT: list[str] = [
+    "acs5_median_household_renter_occupied_gross_rent",
+    "acs5_median_income_household_past_year",
     "char_beds",     # bedroom count
+    "char_bldg_sf",
     "char_fbath",    # full-bath count
+    "char_land_sf",
     "char_yrblt",    # year built
-    # "char_rooms",  # add others once profiling confirms they are whole-numbered
+    "loc_access_cmap_walk_total_score",	
+    ""
 ]
 
 # Columns to drop during wrangling because they are redundant / superseded.
@@ -208,9 +218,33 @@ CHANGE_DTYPE_FROM_FLOAT_TO_INT: list[str] = [
 # NOTE: start empty; add columns as profiling reveals duplicates. Examples of the
 # kind of thing that lands here (uncomment/edit after confirming):
 DROP_REDUNDANT_COLS_WRANGLING: list[str] = [
+    "char_attic_fnsh",
+    "char_porch",
+    "char_attic_type",
+    "char_bsmt_fin",
+    "char_roof_cnst",
     # "loc_x_3435", "loc_y_3435",  # projected coords duplicate lat/long for our use
     # SCHOOL_RATED_COUNT,          # only needed to derive the flag; drop after derive
 ]
+
+# ===========================================================================
+# Sanity bounds for outlier / data-error checks (clean.sanity_checks)
+# ===========================================================================
+# Plausible (lo, hi) ranges for Chicago single-family; None = no bound that side.
+# Rows outside a bound are DATA-ERROR candidates — REPORTED, not dropped — and are
+# distinct from genuine price-extreme tails, which we keep and diagnose later.
+SANITY_BOUNDS: dict[str, tuple] = {
+    "char_bldg_sf":    (50, 20_000),   # building sqft
+    "char_land_sf":    (50, 30_000),   # lot sqft
+    "char_beds":       (1, 12),        # 0 beds suspect; >12 implausible for SF
+    "char_fbath":      (1, 10),
+    "char_yrblt":      (1850, 2025),   # plausible construction years
+    "meta_sale_price": (PRICE_FLOOR, None),  # floor already enforced upstream
+}
+
+# Price-ratio sanity bands — clean.add_price_ratios flags values outside these.
+PRICE_PER_SQFT_BOUNDS = (20, 2_000)         # $ per building sqft
+PRICE_PER_BED_BOUNDS = (5_000, 2_000_000)   # $ per bedroom
 
 # ===========================================================================
 # CCAO legal-entity keyword regex — a mechanical lookup lifted from CCAO's
