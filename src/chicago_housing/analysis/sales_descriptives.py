@@ -1,10 +1,12 @@
-"""EDA computations — each takes a frame, returns a tidy DataFrame. Population-
-agnostic: pass all sales, or a slice (entity, stale, a neighborhood). No plotting.
+"""Descriptive sales-market summaries — each takes a frame, returns a tidy
+DataFrame ready to plot. Population-agnostic: pass all sales, or a slice (entity,
+stale, a neighborhood). Pure aggregation, no plotting (renderers live in
+viz/charts.py). Column-shape diagnostics live in data/distributions.py.
 """
 
 from __future__ import annotations
 import pandas as pd
-from chicago_housing import config as C
+from chicago_housing import constants as K
 
 
 def sales_by_year(df: pd.DataFrame) -> pd.DataFrame:
@@ -19,15 +21,15 @@ def sales_by_month(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def top_neighborhoods(df: pd.DataFrame, n: int = 10) -> pd.DataFrame:
-    return (df.groupby(C.REPORT_GEO).size()
+    return (df.groupby(K.REPORT_GEO).size()
               .rename("n_sales").sort_values(ascending=False)
               .head(n).reset_index())
 
 
 def median_price_by_neighborhood_year(df: pd.DataFrame, neighborhoods=None) -> pd.DataFrame:
     """Median sale price per neighborhood per year (long form, ready to plot)."""
-    d = df if neighborhoods is None else df[df[C.REPORT_GEO].isin(neighborhoods)]
-    return (d.groupby([C.REPORT_GEO, "meta_year"])[C.TARGET_RAW]
+    d = df if neighborhoods is None else df[df[K.REPORT_GEO].isin(neighborhoods)]
+    return (d.groupby([K.REPORT_GEO, "meta_year"])[K.TARGET_RAW]
               .median().rename("median_price").reset_index())
 
 
@@ -44,7 +46,7 @@ def parcel_transaction_stats(df: pd.DataFrame) -> pd.DataFrame:
 
 def same_parcel_price_gaps(df: pd.DataFrame) -> pd.DataFrame:
     """For parcels sold >1x: the max/min price ratio — the non-market smoking gun."""
-    g = df.groupby("meta_pin")[C.TARGET_RAW].agg(["min", "max", "size"])
+    g = df.groupby("meta_pin")[K.TARGET_RAW].agg(["min", "max", "size"])
     g = g[g["size"] > 1].copy()
     g["price_ratio"] = g["max"] / g["min"]
     return g.reset_index().rename(columns={"size": "n_sales"})
