@@ -2,6 +2,7 @@
 /data
 *.DS_Store
 /outputs/tables
+/docs/images
 
 
 # Byte-compiled / optimized / DLL files

@@ -21,3 +21,4 @@ OUTPUTS = ROOT / "outputs"
 
 SF_TRAINING_PARQUET = DATA_RAW / "sf_training_data.parquet"
 CONDO_TRAINING_PARQUET = DATA_RAW / "condo_training_data.parquet"
+COMMUNITY_AREAS_GEOJSON = DATA_RAW / "chicago_community_areas_boundaries.geojson"  # city portal (77 areas)

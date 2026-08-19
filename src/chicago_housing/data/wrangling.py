@@ -1,8 +1,9 @@
-"""Step 0a: scope filters, sale-validity handling, column profiling, sample build.
+"""Wrangling: raw parquet -> model-ready analytic sample.
 
-The public parquet is COUNTYWIDE, all property types, ~9 years. We carve a clean
-Chicago / single-family / 2022-25 cross-section before any modeling, then split
-sale validity (drop non-arm's-length, keep price-extreme) and log the target.
+Everything from carving the Chicago / single-family / 2022-25 cross-section
+through recoding, feature derivation, sale-validity classification, log
+transforms, and the final drops. build_analytic_sample() is the ONE entry point;
+each of its steps is also a standalone function the EDA notebook calls directly.
 """
 
 from __future__ import annotations
@@ -11,38 +12,21 @@ import numpy as np
 import pandas as pd
 
 from chicago_housing import constants as K
-from chicago_housing.constants import (
-    TARGET_RAW, 
-    CITY_COL,
-    MODELING_GROUP_COL, 
-    MULTICARD_COL, 
-    PRORATED_COL,
-    SELLER_NAME,
-    BUYER_NAME,
-    SALE_DATE_COLS,
-    SV_REASON_COLS,
-    BLOCK_A_STRUCTURE,
-    BLOCK_B_LOCATION,
-    ENGINEERED,
-    DERIVE_INPUTS,
-    DEMOGRAPHICS,
-    KEYS,
-    GEO_COORDS,
-    REPORT_GEO
-)
+from chicago_housing.features import derive
+
 
 # every column the analytic pipeline needs to read
 def analysis_columns() -> list[str]:
     cols = (
-        [TARGET_RAW, CITY_COL, MODELING_GROUP_COL, MULTICARD_COL, PRORATED_COL,
-         SELLER_NAME, BUYER_NAME]
-        + SALE_DATE_COLS
-        + SV_REASON_COLS
-        + BLOCK_A_STRUCTURE
-        + [c for c in BLOCK_B_LOCATION if c not in ENGINEERED]
-        + DERIVE_INPUTS
-        + DEMOGRAPHICS
-        + KEYS + GEO_COORDS + [REPORT_GEO]
+        [K.TARGET_RAW, K.CITY_COL, K.MODELING_GROUP_COL, K.MULTICARD_COL, K.PRORATED_COL,
+         K.SELLER_NAME, K.BUYER_NAME]
+        + K.SALE_DATE_COLS
+        + K.SV_REASON_COLS
+        + K.BLOCK_A_STRUCTURE
+        + [c for c in K.BLOCK_B_LOCATION if c not in K.ENGINEERED]
+        + K.DERIVE_INPUTS
+        + K.DEMOGRAPHICS
+        + K.KEYS + K.GEO_COORDS + [K.REPORT_GEO] + [K.ADDRESS]
     )
     seen, out = set(), []
     for c in cols:
@@ -55,28 +39,96 @@ def _as_bool(s: pd.Series) -> pd.Series:
     """Robust boolean coercion (handles python bools OR 'True'/'False' strings)."""
     return s.astype("string").str.strip().str.lower().isin(["true", "1", "t", "yes"])
 
-# ---------------------------------------------------------------------------
-# Scope filters
-# ---------------------------------------------------------------------------
-def scope_filter(df: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
-    """Chicago + single-family + 2022-25 + single-card / non-prorated."""
-    n0 = len(df)
-    # Filter for Chicago
-    out = df[df[K.CITY_COL].astype("string").str.upper() == K.CITY]
-    # Filter for Single Family
-    out = out[out[K.MODELING_GROUP_COL].astype("string") == K.MODELING_GROUP]
-    # Filter for years 2022,2023, 2024 and 2025
-    out = out[out[K.SALE_YEAR].astype("string").isin(K.YEARS)]
 
-    # Multi-card refers to parcels with multiple structures; we will drop them for simplicity
-    if K.SINGLE_CARD_ONLY:
-        out = out[~_as_bool(out[K.MULTICARD_COL])]
-        out = out[~_as_bool(out[K.PRORATED_COL])]
-    # Drop redundant columns after filtering
-    out = out.drop(columns=[K.CITY_COL, K.MODELING_GROUP_COL, K.MULTICARD_COL, K.PRORATED_COL])
+def add_region(df: pd.DataFrame, ptype=K.SF, col: str = K.REGION_COL,
+               verbose: bool = True) -> pd.DataFrame:
+    """Attach each sale's 'side' from the PropertyType's region scheme — 3-way
+    N/W/S for single/multi-family, 4-way (adds Central) for condo. Ordered
+    categorical so plots/tables sort in the config's region_order. Any community
+    area absent from the scheme raises loudly (a silent drop would break every
+    regional tally); load_sales_sample pre-drops unmapped rows so it won't fire in
+    normal use.
+    """
+    order = list(ptype.region_order)
+    out = df.copy()
+    region = out[K.REPORT_GEO].map(ptype.region_map)
+    missing = sorted(set(out.loc[region.isna(), K.REPORT_GEO].dropna().unique()))
+    if missing:
+        raise KeyError(f"community areas absent from {ptype.key} region map: {missing}")
+    out[col] = pd.Categorical(region, categories=order, ordered=True)
     if verbose:
-        print(f"scope_filter:        {n0:>8,} -> {len(out):>8,} rows")
+        print(f"add_region [{ptype.key}]: {out[col].value_counts().reindex(order).to_dict()}")
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Scope + columns + assembly — all driven by the PropertyType config
+# ---------------------------------------------------------------------------
+def scope_filter(df: pd.DataFrame, ptype=K.SF, verbose: bool = True) -> pd.DataFrame:
+    """Carve `ptype`'s analytic cross-section: its city + modeling group + years,
+    and (SF/MF only) drop multi-card / prorated rows. One function per market —
+    condo skips the card filter (no multi-card concept; always prorated)."""
+    n0 = len(df)
+    out = df[df[K.CITY_COL].astype("string").str.upper() == ptype.city]
+    out = out[out[K.MODELING_GROUP_COL].astype("string") == ptype.modeling_group]
+    out = out[out[K.SALE_YEAR].astype("string").isin(ptype.years)]
+    drop_cols = [K.CITY_COL, K.MODELING_GROUP_COL]
+    if ptype.single_card_scope:              # SF/MF want one clean card per sale
+        out = out[(~_as_bool(out[K.MULTICARD_COL])) & (~_as_bool(out[K.PRORATED_COL]))]
+        drop_cols += [K.MULTICARD_COL, K.PRORATED_COL]
+    out = out.drop(columns=[c for c in drop_cols if c in out.columns])
+    if verbose:
+        print(f"scope_filter [{ptype.key}]: {n0:>8,} -> {len(out):>8,} rows")
     return out.copy()
+
+
+def sales_columns(ptype=K.SF) -> list[str]:
+    """The lean column set the 01_02 sales analysis reads for `ptype`. Requests the
+    type's RAW structure names (condo's unit fields via column_rename keys, else the
+    canonical char_*) and only the scope columns that parquet actually has."""
+    structure = (list(ptype.column_rename) if ptype.column_rename
+                 else ["char_bldg_sf", "char_beds", "char_fbath", "char_land_sf"])
+    scope = [K.MULTICARD_COL, K.PRORATED_COL] if ptype.single_card_scope else []
+    cols = ([K.TARGET_RAW, K.CITY_COL, K.MODELING_GROUP_COL, K.SELLER_NAME, K.BUYER_NAME]
+            + K.SALE_DATE_COLS + K.SV_REASON_COLS + scope
+            + structure + ["char_yrblt", "meta_pin"]
+            + K.GEO_COORDS + [K.REPORT_GEO, K.ADDRESS])
+    seen, out = set(), []
+    for c in cols:
+        if c not in seen:
+            seen.add(c); out.append(c)
+    return out
+
+
+def rename_columns(df: pd.DataFrame, ptype=K.SF) -> pd.DataFrame:
+    """Rename a type's raw structure columns to canonical char_* names
+    (PropertyType.column_rename). A no-op when already canonical (SF/MF)."""
+    present = {k: v for k, v in ptype.column_rename.items() if k in df.columns}
+    return df.rename(columns=present)
+
+
+def load_sales_sample(ptype, verbose: bool = True) -> pd.DataFrame:
+    """One-call setup for the 01_02 sales notebooks. load `ptype`'s parquet -> scope
+    -> rename to canonical -> classify + drop non-arm's-length -> derive sale_month
+    -> attach region. Every 01_02 notebook is then one line:
+    `enriched = wrangling.load_sales_sample(K.MF)`.
+
+    Rows whose community area isn't in this type's region scheme (null geo, or e.g.
+    the Loop's ~2 multi-family sales) are dropped up front so every neighborhood /
+    region / citywide tally reconciles.
+    """
+    from chicago_housing.data.load import load_training_data
+    raw = load_training_data(ptype.parquet_key, columns=sales_columns(ptype))
+    df = rename_columns(scope_filter(raw, ptype, verbose=verbose), ptype)
+    flags = classify_sales(df)
+    enriched = apply_drop_policy(df.join(flags), flags, verbose=verbose)
+    enriched["meta_sale_date"] = pd.to_datetime(enriched["meta_sale_date"])
+    enriched["sale_month"] = enriched["meta_sale_date"].dt.month
+    n0 = len(enriched)
+    enriched = enriched[enriched[K.REPORT_GEO].isin(ptype.region_map)].copy()
+    if verbose and n0 != len(enriched):
+        print(f"dropped {n0 - len(enriched):,} unmapped / no-geo rows")
+    return add_region(enriched, ptype, verbose=verbose)
 
 # ---------------------------------------------------------------------------
 # Wrangling fixes — dtype correction + redundant-column drops
@@ -250,24 +302,28 @@ def sanity_checks(df: pd.DataFrame, bounds: dict | None = None) -> pd.DataFrame:
 
 
 def add_price_ratios(df: pd.DataFrame, flag: bool = True) -> pd.DataFrame:
-    """Add price_per_sqft and price_per_bed (returns a copy).
+    """Add price_per_bldg_sqft, price_per_land_sqft, price_per_bed (returns a copy).
 
     The ratios are a tighter lens than price alone: an absurd $/sqft flags EITHER
     a price error OR a size error, catching joint mistakes a per-column check
-    misses. flag=True also adds boolean is_ppsf_outlier / is_ppbed_outlier from
-    the constants bands. Division guards zeros/nulls -> NaN (never inf).
+    misses. flag=True also adds booleans is_ppsf_outlier / is_ppland_outlier /
+    is_ppbed_outlier from the constants bands. Division guards zeros/nulls -> NaN.
     """
     out = df.copy()
     price = pd.to_numeric(out[K.TARGET_RAW], errors="coerce")
-    sqft = pd.to_numeric(out["char_bldg_sf"], errors="coerce").replace(0, np.nan)
+    bldg_sqft = pd.to_numeric(out["char_bldg_sf"], errors="coerce").replace(0, np.nan)
+    land_sqft = pd.to_numeric(out["char_land_sf"], errors="coerce").replace(0, np.nan)
     beds = pd.to_numeric(out["char_beds"], errors="coerce").replace(0, np.nan)
-    out["price_per_sqft"] = price / sqft
+    out["price_per_bldg_sqft"] = price / bldg_sqft
+    out["price_per_land_sqft"] = price / land_sqft
     out["price_per_bed"] = price / beds
     if flag:
-        lo_s, hi_s = K.PRICE_PER_SQFT_BOUNDS
-        lo_b, hi_b = K.PRICE_PER_BED_BOUNDS
-        out["is_ppsf_outlier"] = (out["price_per_sqft"] < lo_s) | (out["price_per_sqft"] > hi_s)
-        out["is_ppbed_outlier"] = (out["price_per_bed"] < lo_b) | (out["price_per_bed"] > hi_b)
+        lo_bldg, hi_bldg = K.PRICE_PER_BLDG_SQFT_BOUNDS
+        lo_land, hi_land = K.PRICE_PER_LAND_SQFT_BOUNDS
+        lo_bed, hi_bed = K.PRICE_PER_BED_BOUNDS
+        out["is_ppsf_outlier"]   = (out["price_per_bldg_sqft"] < lo_bldg) | (out["price_per_bldg_sqft"] > hi_bldg)
+        out["is_ppland_outlier"] = (out["price_per_land_sqft"] < lo_land) | (out["price_per_land_sqft"] > hi_land)
+        out["is_ppbed_outlier"]  = (out["price_per_bed"] < lo_bed) | (out["price_per_bed"] > hi_bed)
     return out
 
 
@@ -354,8 +410,8 @@ def classify_sales(df: pd.DataFrame) -> pd.DataFrame:
 
     return flags
 
-def drop_non_market(df: pd.DataFrame, flags: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
-    """Apply the drop POLICY to pre-computed flags. Returns the filtered frame only.
+def apply_drop_policy(df: pd.DataFrame, flags: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
+    """Apply the non-market drop POLICY to pre-computed flags. Returns the filtered frame.
 
     Policy (see context.md §3):
       - statutory (PTAX/family)      -> always drop (non-market by definition)
@@ -379,7 +435,7 @@ def drop_non_market(df: pd.DataFrame, flags: pd.DataFrame, verbose: bool = True)
 
     out = df[~drop].copy()
     if verbose:
-        print(f"drop_non_market: {len(df):,} -> {len(out):,}")
+        print(f"apply_drop_policy: {len(df):,} -> {len(out):,}")
         print(f"  statutory (PTAX/family): {int(flags['is_statutory'].sum()):,}")
         print(f"  below ${K.PRICE_FLOOR:,} floor:    {int(flags['is_below_floor'].sum()):,}")
         print(f"  entity + price-corrob.:  {int(entity_nonmarket.sum()):,}")
@@ -395,15 +451,46 @@ def add_log_target(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def build_analytic_sample(df: pd.DataFrame, verbose: bool = True, recode: bool = True) -> pd.DataFrame:
-    """Full Step 0a pipeline: scope -> recode categoricals -> validity -> log target -> drop null target."""
+def build_analytic_sample(
+    df: pd.DataFrame,
+    *,
+    recode: bool = True,
+    add_features: bool = True,
+    add_logs: bool = True,
+    drop_non_market: bool = True,
+    drop_null_target: bool = True,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Raw parquet -> model-ready analytic sample. Each step is a keyword toggle,
+    so you can build variants for regression iterations (e.g. add_logs=False).
+
+    Order:
+      scope_filter (always)
+      -> recode            : numeric char_ codes -> readable labels
+      -> drop_non_market   : classify sales + drop non-arm's-length (keep price-extreme)
+      -> add_features      : dist_to_loop_ft, no_rated_school_nearby, char_gar1_exists
+      -> add_logs          : log_sale_price + log_char_bldg_sf / log_char_land_sf / ...
+      -> drop_null_target  : drop rows with no (log) sale price
+
+    Features/logs are computed AFTER the non-market drop, so they reflect the final
+    sample (e.g. the school-rating median fill). add_features must precede add_logs
+    because log_dist_to_loop_ft needs dist_to_loop_ft.
+    """
     out = scope_filter(df, verbose=verbose)
     if recode:
-        out = recode_categoricals(out, verbose=verbose)   # numeric char_ codes -> readable labels
-    flags = classify_sales(out)                       # label each sale by its flags
-    out = drop_non_market(out, flags, verbose=verbose)  # apply the drop policy
-    out = add_log_target(out)
-    out = out[out[K.TARGET].notna()].copy()
+        out = recode_categoricals(out, verbose=verbose)
+    if drop_non_market:
+        flags = classify_sales(out)
+        out = apply_drop_policy(out, flags, verbose=verbose)
+    if add_features:
+        out = derive.add_distance_to_loop(out)
+        out = derive.add_no_rated_school_flag(out)
+        out = derive.add_gar1_exists_flag(out)
+    if add_logs:
+        out = derive.add_log_features(out)
+        out = add_log_target(out)
+    if drop_null_target and K.TARGET in out.columns:
+        out = out[out[K.TARGET].notna()].copy()
     if verbose:
         print(f"analytic sample:              {len(out):>8,} rows")
     return out

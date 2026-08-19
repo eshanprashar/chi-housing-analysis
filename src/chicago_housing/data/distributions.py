@@ -40,7 +40,7 @@ def summarize_distributions(
 ) -> pd.DataFrame:
     """Per-column moments + percentiles + a transform hint.
 
-    One row per (numeric) column: mean/std, the 1/50/99 percentiles and min/max,
+    One row per (numeric) column: mean/std, the 10/50/99 percentiles and min/max,
     skew, kurtosis, and `tail_ratio` = p99 / median (how far the upper tail runs
     above the middle). `transform_hint` is a heuristic nudge, not a verdict:
 
@@ -57,7 +57,8 @@ def summarize_distributions(
             continue
         skew = float(s.skew())
         q10, q50, q99 = (float(v) for v in s.quantile([0.1, 0.50, 0.99]))
-        tail_ratio = q99 / q50 if q50 not in (0.0,) else np.nan
+        p99_p50_ratio = q99 / q50 if q50 not in (0.0,) else np.nan
+        max_p99_ratio = (s.max() / q99)
         nonneg = bool((s >= 0).all())
 
         hints = []
@@ -65,7 +66,7 @@ def summarize_distributions(
             hints.append("log candidate")
         elif skew < -skew_threshold:
             hints.append("left-skew")
-        if np.isfinite(tail_ratio) and tail_ratio > tail_threshold:
+        if np.isfinite(p99_p50_ratio) and p99_p50_ratio > tail_threshold:
             hints.append("heavy upper tail")
 
         rows.append({
@@ -74,13 +75,14 @@ def summarize_distributions(
             "mean": float(s.mean()),
             "std": float(s.std()),
             "min": float(s.min()),
-            "p01": q10,
+            "p10": q10,
             "median": q50,
             "p99": q99,
             "max": float(s.max()),
             "skew": round(skew, 2),
             "kurtosis": round(float(s.kurtosis()), 2),
-            "tail_ratio": round(float(tail_ratio), 2) if np.isfinite(tail_ratio) else None,
+            "p99_p50_ratio": round(float(p99_p50_ratio), 2) if np.isfinite(p99_p50_ratio) else None,
+            "max_p99_ratio": round(float(max_p99_ratio),2) if np.isfinite(max_p99_ratio) else None,
             "transform_hint": " + ".join(hints),
         })
 

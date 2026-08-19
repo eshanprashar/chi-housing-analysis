@@ -15,6 +15,8 @@ Column names were verified against the parquet schema (Step 0a).
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 # ===========================================================================
 # Column identifiers — the exact strings as they appear in the parquet schema
 # ===========================================================================
@@ -52,6 +54,68 @@ GEO_COORDS = ["loc_latitude", "loc_longitude", "loc_x_3435", "loc_y_3435"]
 REPORT_GEO = "loc_chicago_community_area_name"   # reader-facing geography
 ADDRESS = "loc_property_address"
 
+# ---------------------------------------------------------------------------
+# Reader-facing "sides" — the 1830 Chicago-River three-part division
+# (chicagostudies.uchicago.edu/sides): North, West, South. Reconciled to the 77
+# community areas via the city's OFFICIAL lists — the West Side's nine areas and
+# the South Side's forty-two (which explicitly includes the "Far Southeast Side",
+# East Side among them). Central areas the official lists leave unstated are
+# placed by geography: Near West is already official West; Near North -> North;
+# Near South -> South.
+#
+# EAST SIDE FOOTNOTE: the community area literally named "East Side" is east of
+# the CALUMET river (not the Chicago), and the city files it under the South Side
+# (Far Southeast). It is NOT a fourth cardinal "side" — we fold it into South and
+# footnote the quirk wherever the geography is the point.
+REGION_COL = "region"
+REGION_ORDER = ["North", "West", "South"]
+EAST_SIDE_AREA = "EAST SIDE"   # colloquially its own 'side'; officially South (Far SE)
+
+REGION_MEMBERS = {
+    "North": [   # North Side + Northwest Side + Near North (24)
+        "ROGERS PARK", "EDISON PARK", "WEST RIDGE", "FOREST GLEN", "NORTH PARK",
+        "EDGEWATER", "NORWOOD PARK", "JEFFERSON PARK", "LINCOLN SQUARE", "UPTOWN",
+        "ALBANY PARK", "OHARE", "PORTAGE PARK", "IRVING PARK", "NORTH CENTER",
+        "DUNNING", "LAKE VIEW", "AVONDALE", "MONTCLARE", "BELMONT CRAGIN",
+        "HERMOSA", "LINCOLN PARK", "LOGAN SQUARE", "NEAR NORTH SIDE",
+    ],
+    "West": [    # the city's official West Side (9)
+        "WEST TOWN", "NEAR WEST SIDE", "LOWER WEST SIDE", "HUMBOLDT PARK",
+        "EAST GARFIELD PARK", "WEST GARFIELD PARK", "NORTH LAWNDALE",
+        "SOUTH LAWNDALE", "AUSTIN",
+    ],
+    "South": [   # South + Southwest + Far Southwest + Far Southeast + Near South (43)
+        "ARMOUR SQUARE", "BRIDGEPORT", "DOUGLAS", "ENGLEWOOD", "FULLER PARK",
+        "GRAND BOULEVARD", "GREATER GRAND CROSSING", "HYDE PARK", "KENWOOD",
+        "OAKLAND", "SOUTH SHORE", "WASHINGTON PARK", "WOODLAWN",
+        "ARCHER HEIGHTS", "BRIGHTON PARK", "CHICAGO LAWN", "CLEARING", "GAGE PARK",
+        "GARFIELD RIDGE", "MCKINLEY PARK", "NEW CITY", "WEST ELSDON",
+        "WEST ENGLEWOOD", "WEST LAWN",
+        "ASHBURN", "AUBURN GRESHAM", "BEVERLY", "MORGAN PARK", "MOUNT GREENWOOD",
+        "WASHINGTON HEIGHTS",
+        "AVALON PARK", "BURNSIDE", "CALUMET HEIGHTS", "CHATHAM", "EAST SIDE",
+        "HEGEWISCH", "PULLMAN", "RIVERDALE", "ROSELAND", "SOUTH CHICAGO",
+        "SOUTH DEERING", "WEST PULLMAN",
+        "NEAR SOUTH SIDE",
+    ],
+}
+# community-area name -> region (flattened for a fast .map())
+REGION_MAP = {area: region for region, areas in REGION_MEMBERS.items() for area in areas}
+
+# ---------------------------------------------------------------------------
+# CONDO variant of the sides. Condos (unlike single-family) are a DOWNTOWN
+# market, so the four official "Central" community areas — the Loop plus Near
+# North / South / West — form their own region instead of folding into N/S/W.
+# This DELIBERATELY diverges from the SF map (where Near-* went to N/S/W and the
+# Loop had no sales): here Central is the high-rise core. All 77 areas covered.
+CENTRAL_AREAS = ["LOOP", "NEAR NORTH SIDE", "NEAR SOUTH SIDE", "NEAR WEST SIDE"]
+CONDO_REGION_MEMBERS = {
+    "Central": CENTRAL_AREAS,
+    "North": [a for a in REGION_MEMBERS["North"] if a not in CENTRAL_AREAS],
+    "West":  [a for a in REGION_MEMBERS["West"] if a not in CENTRAL_AREAS],
+    "South": [a for a in REGION_MEMBERS["South"] if a not in CENTRAL_AREAS],
+}
+
 # ===========================================================================
 # Analytic scope — which rows constitute the sample (carved BEFORE modeling)
 # ===========================================================================
@@ -64,6 +128,64 @@ YEARS = ["2022", "2023", "2024", "2025"]  # values in SALE_YEAR — excludes COV
 
 # card <-> PIN cleanliness (drop multi-card / prorated so the unit is clean)
 SINGLE_CARD_ONLY = True
+
+# ===========================================================================
+# Property-type registry — one config object per market the 01_02 sales analysis
+# runs on. Bundles everything that differs between single-family, multi-family and
+# condo: the raw file, the modeling-group value, scope rules, the column rename,
+# and the region scheme. The generic wrangling/maps functions read a PropertyType
+# instead of hard-coding SF, so every 01_02 notebook is identical but for `P=K.*`.
+#
+# Notes captured in the flags:
+#   single_card_scope — SF & MF drop multi-card + prorated; condos have no
+#     multi-card concept and are ALWAYS prorated, so they skip both filters.
+#   price_only — condo unit sqft/beds/baths are ~70% null, so condo analysis is
+#     price-based (no $/sqft); SF & MF have full characteristics.
+#   region scheme — SF & MF use the 3-side N/W/S map (they're neighborhood
+#     residential; the Loop is ~empty for them); condos add a downtown Central.
+# (parquet_key resolves to a file in config.py — constants stays path-free.)
+@dataclass(frozen=True)
+class PropertyType:
+    key: str                 # 'sf' | 'mf' | 'condo' — also the notebook subfolder
+    label: str               # human label ('single-family', ...)
+    parquet_key: str         # load_training_data source: 'sf' or 'condo'
+    city: str                # value in CITY_COL
+    modeling_group: str      # value in MODELING_GROUP_COL
+    years: tuple             # values in SALE_YEAR
+    single_card_scope: bool  # drop multi-card + prorated rows?
+    price_only: bool         # skip $/sqft (sparse characteristics)?
+    column_rename: dict       # raw -> canonical char names ({} when already canonical)
+    region_members: dict      # region -> [community areas]
+    region_order: tuple
+
+    @property
+    def region_map(self) -> dict:
+        """community-area name -> region (flattened for a fast .map())."""
+        return {a: r for r, areas in self.region_members.items() for a in areas}
+
+
+SF = PropertyType(
+    key="sf", label="single-family", parquet_key="sf", city=CITY,
+    modeling_group="SF", years=tuple(YEARS), single_card_scope=True,
+    price_only=False, column_rename={},
+    region_members=REGION_MEMBERS, region_order=tuple(REGION_ORDER))
+
+MF = PropertyType(   # same parquet as SF, just a different modeling group
+    key="mf", label="multi-family", parquet_key="sf", city=CITY,
+    modeling_group="MF", years=tuple(YEARS), single_card_scope=True,
+    price_only=False, column_rename={},
+    region_members=REGION_MEMBERS, region_order=tuple(REGION_ORDER))
+
+CONDO = PropertyType(
+    key="condo", label="condo", parquet_key="condo", city=CITY,
+    modeling_group="CONDO", years=tuple(YEARS), single_card_scope=False,
+    price_only=True,
+    column_rename={"char_unit_sf": "char_bldg_sf",   # the UNIT's living area
+                   "char_bedrooms": "char_beds",
+                   "char_full_baths": "char_fbath"},
+    region_members=CONDO_REGION_MEMBERS, region_order=("Central", "North", "West", "South"))
+
+PROPERTY_TYPES = {p.key: p for p in (SF, MF, CONDO)}
 
 # ===========================================================================
 # Sale validity: DROP non-arm's-length, RETAIN price-extreme
@@ -130,10 +252,11 @@ BLOCK_A_STRUCTURE = [
     "char_porch",       # porch
     "char_roof_cnst",   # roof material / construction
     "char_yrblt",       # age — non-linearity candidate
+    #"char_bldg_is_mixed_use"
 ]
 
 BLOCK_B_LOCATION = [
-    "dist_to_loop_ft",                       # ENGINEERED (features/spatial.py) — CBD/monocentric
+    "dist_to_loop_ft",                       # ENGINEERED (features/derive.py) — CBD/monocentric
     "prox_lake_michigan_dist_ft",            # lakefront premium
     "prox_nearest_cta_stop_dist_ft",         # transit access
     "prox_nearest_park_dist_ft",             # parks
@@ -218,11 +341,11 @@ CHANGE_DTYPE_FROM_FLOAT_TO_INT: list[str] = [
 # NOTE: start empty; add columns as profiling reveals duplicates. Examples of the
 # kind of thing that lands here (uncomment/edit after confirming):
 DROP_REDUNDANT_COLS_WRANGLING: list[str] = [
-    "char_attic_fnsh",
-    "char_porch",
-    "char_attic_type",
-    "char_bsmt_fin",
-    "char_roof_cnst",
+    "char_attic_fnsh", #33K values are None
+    "char_porch", #~32K values are None
+    "char_attic_type", #~24K full; ~11K partial
+    "char_bsmt_fin", #~28K unfinished; ~13K formal rec room
+    "char_roof_cnst", #~90% values are Shingle + Asphalt 
     # "loc_x_3435", "loc_y_3435",  # projected coords duplicate lat/long for our use
     # SCHOOL_RATED_COUNT,          # only needed to derive the flag; drop after derive
 ]
@@ -243,7 +366,8 @@ SANITY_BOUNDS: dict[str, tuple] = {
 }
 
 # Price-ratio sanity bands — clean.add_price_ratios flags values outside these.
-PRICE_PER_SQFT_BOUNDS = (20, 2_000)         # $ per building sqft
+PRICE_PER_BLDG_SQFT_BOUNDS = (20, 3_000)         # $ per building sqft
+PRICE_PER_LAND_SQFT_BOUNDS = (20, 3_000)
 PRICE_PER_BED_BOUNDS = (5_000, 2_000_000)   # $ per bedroom
 
 # ===========================================================================
