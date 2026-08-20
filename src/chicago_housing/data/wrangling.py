@@ -21,7 +21,7 @@ def analysis_columns() -> list[str]:
         [K.TARGET_RAW, K.CITY_COL, K.MODELING_GROUP_COL, K.MULTICARD_COL, K.PRORATED_COL,
          K.SELLER_NAME, K.BUYER_NAME]
         + K.SALE_DATE_COLS
-        + K.SV_REASON_COLS
+        + K.SV_REASON_COLS + [K.SV_IS_OUTLIER_COL]   # sv_is_outlier: regression outlier drop
         + K.BLOCK_A_STRUCTURE
         + [c for c in K.BLOCK_B_LOCATION if c not in K.ENGINEERED]
         + K.DERIVE_INPUTS
@@ -348,7 +348,13 @@ def flag_log_iqr(df: pd.DataFrame, columns: list[str], k: float = 1.5) -> pd.Dat
 
 
 # ---------------------------------------------------------------------------
-# Sale validity: non-arm's-length (drop) vs price-extreme (keep)
+# Sale validity — two orthogonal axes, applied to two samples:
+#   1. Non-arm's-length (invalid observation): PTAX-203 declared non-market, or
+#      an entity sale whose price is ALSO non-market. Dropped from BOTH samples.
+#   2. Price-extreme (valid sale, high leverage): CCAO's sv_is_outlier. KEPT for
+#      the descriptive/01_02 sample (real market events — the flips live here),
+#      DROPPED for the 02_* regression sample (stop a few tail prices dominating
+#      the fit). Toggled by apply_drop_policy(drop_price_outliers=...).
 # ---------------------------------------------------------------------------
 
 def _is_legal_entity(name: pd.Series) -> pd.Series:
@@ -389,9 +395,16 @@ def classify_sales(df: pd.DataFrame) -> pd.DataFrame:
     flags = pd.DataFrame(index=df.index)
 
     # --- consumed from CCAO's pre-computed reason columns ---
-    flags["is_statutory"] = reasons.map(lambda s: bool(s & K.SV_ALWAYS_DROP))    # PTAX / Family
+    flags["is_statutory"] = reasons.map(lambda s: bool(s & K.SV_ALWAYS_DROP))    # PTAX-203 (declared non-market)
     flags["is_nominal"]   = reasons.map(lambda s: bool(s & K.SV_NOMINAL_PRICE))  # low price / $sqft / raw
     flags["is_below_floor"] = price < K.PRICE_FLOOR
+
+    # CCAO's statistical price-outlier verdict (price-only). Present only when the
+    # caller loaded sv_is_outlier (regression path); absent for the lean 01_02 read.
+    if K.SV_IS_OUTLIER_COL in df.columns:
+        flags["is_price_outlier"] = df[K.SV_IS_OUTLIER_COL].fillna(False).astype(bool)
+    else:
+        flags["is_price_outlier"] = pd.Series(False, index=df.index)
 
     # --- entity: RECOMPUTED with CCAO's keyword regex, per side ---
     # A sale is "Non-person" if EITHER party is a legal entity (their
@@ -410,20 +423,25 @@ def classify_sales(df: pd.DataFrame) -> pd.DataFrame:
 
     return flags
 
-def apply_drop_policy(df: pd.DataFrame, flags: pd.DataFrame, verbose: bool = True) -> pd.DataFrame:
+def apply_drop_policy(df: pd.DataFrame, flags: pd.DataFrame, verbose: bool = True,
+                      drop_price_outliers: bool = False) -> pd.DataFrame:
     """Apply the non-market drop POLICY to pre-computed flags. Returns the filtered frame.
 
-    Policy (see context.md §3):
-      - statutory (PTAX/family)      -> always drop (non-market by definition)
+    Baseline policy (both samples):
+      - statutory (PTAX-203)         -> always drop (non-market by declaration)
       - sub-floor price              -> always drop
       - entity / holding-name        -> drop ONLY IF price-corroborated (nominal | below)
       - price-extreme, stale, etc.   -> KEEP (diagnostics handle influence)
+
+    `drop_price_outliers` (regression / 02_* only) ADDS CCAO's sv_is_outlier verdict to
+    the drop, trimming the statistical price tail before the hedonic fit. Left False for
+    the descriptive 01_02 sample so the extremes (the flips) stay in.
     """
     price_corroborated = flags["is_nominal"] | flags["is_below_floor"]
 
     entity_nonmarket = flags["is_entity"]   & price_corroborated   # corroboration rule
-    # We are already replicating CCAO's logic to identify entities 
-    # So no need to have a separate name_hit logic 
+    # We are already replicating CCAO's logic to identify entities
+    # So no need to have a separate name_hit logic
     #name_nonmarket   = flags["is_name_hit"] & price_corroborated   # same rule for names
 
     drop = (
@@ -432,13 +450,17 @@ def apply_drop_policy(df: pd.DataFrame, flags: pd.DataFrame, verbose: bool = Tru
         | entity_nonmarket
     #    | name_nonmarket
     )
+    if drop_price_outliers:
+        drop = drop | flags["is_price_outlier"]
 
     out = df[~drop].copy()
     if verbose:
         print(f"apply_drop_policy: {len(df):,} -> {len(out):,}")
-        print(f"  statutory (PTAX/family): {int(flags['is_statutory'].sum()):,}")
+        print(f"  statutory (PTAX-203):    {int(flags['is_statutory'].sum()):,}")
         print(f"  below ${K.PRICE_FLOOR:,} floor:    {int(flags['is_below_floor'].sum()):,}")
         print(f"  entity + price-corrob.:  {int(entity_nonmarket.sum()):,}")
+        if drop_price_outliers:
+            print(f"  sv_is_outlier (price):   {int(flags['is_price_outlier'].sum()):,}")
         #print(f"  name + price-corrob.:    {int(name_nonmarket.sum()):,}")
     return out
 # ---------------------------------------------------------------------------
@@ -458,6 +480,7 @@ def build_analytic_sample(
     add_features: bool = True,
     add_logs: bool = True,
     drop_non_market: bool = True,
+    drop_price_outliers: bool = True,
     drop_null_target: bool = True,
     verbose: bool = True,
 ) -> pd.DataFrame:
@@ -467,7 +490,9 @@ def build_analytic_sample(
     Order:
       scope_filter (always)
       -> recode            : numeric char_ codes -> readable labels
-      -> drop_non_market   : classify sales + drop non-arm's-length (keep price-extreme)
+      -> drop_non_market   : classify sales + drop non-arm's-length; drop_price_outliers
+                             (default True here) also trims CCAO's sv_is_outlier tail —
+                             the regression trim. 01_02's load_sales_sample leaves it off.
       -> add_features      : dist_to_loop_ft, no_rated_school_nearby, char_gar1_exists
       -> add_logs          : log_sale_price + log_char_bldg_sf / log_char_land_sf / ...
       -> drop_null_target  : drop rows with no (log) sale price
@@ -481,7 +506,8 @@ def build_analytic_sample(
         out = recode_categoricals(out, verbose=verbose)
     if drop_non_market:
         flags = classify_sales(out)
-        out = apply_drop_policy(out, flags, verbose=verbose)
+        out = apply_drop_policy(out, flags, verbose=verbose,
+                                drop_price_outliers=drop_price_outliers)
     if add_features:
         out = derive.add_distance_to_loop(out)
         out = derive.add_no_rated_school_flag(out)

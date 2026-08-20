@@ -32,6 +32,10 @@ PRORATED_COL = "ind_pin_is_prorated"
 
 # sale-validity reason columns (three parallel flag columns per sale)
 SV_REASON_COLS = ["sv_outlier_reason1", "sv_outlier_reason2", "sv_outlier_reason3"]
+# CCAO's single boolean price-outlier verdict (True iff a *price* reason fired —
+# high/low price or $/sqft, raw threshold). NOT set by entity/family/PTAX/anomaly.
+# We consume it as the regression sample's outlier drop (see apply_drop_policy).
+SV_IS_OUTLIER_COL = "sv_is_outlier"
 
 # target (raw) + buyer/seller names
 TARGET_RAW = "meta_sale_price"
@@ -204,7 +208,17 @@ NON_ARMS_LENGTH_REASONS = [
     "Quitclaim",
     "Non-arm",
 ]
-SV_ALWAYS_DROP   = {"PTAX-203 Exclusion", "Family Sale"}          # non-market by statute/relationship
+# Non-market by DECLARATION (not price): the Illinois PTAX-203 form's own checkboxes
+# flag short sales / transfers to a financial institution or government body / related
+# parties. Strong, self-reported "this was not an open-market deal", independent of the
+# dollar figure — so we drop it in BOTH samples.
+# NOTE: "Family Sale" is deliberately EXCLUDED. CCAO's flag is a bare buyer/seller
+# SURNAME match (model-sales-val create_name_match: last-token equality, person-to-
+# person, len>1) — no first name, no common-surname handling, no relationship check.
+# It false-positives on common surnames, and CCAO themselves treat it as supplementary
+# (it never sets sv_is_outlier and their training pull doesn't filter on it). The genuine
+# below-market family sales that matter are caught by the price logic anyway.
+SV_ALWAYS_DROP   = {"PTAX-203 Exclusion"}                         # non-market by declaration (PTAX-203)
 SV_ENTITY        = {"Non-person sale"}                            # necessary, NOT sufficient
 SV_NOMINAL_PRICE = {"Low price", "Low price per square foot",     # the price itself looks non-market
                     "Raw price threshold"}
